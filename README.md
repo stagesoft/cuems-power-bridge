@@ -748,13 +748,14 @@ or empty.
 #### `cuems-power-bridge-install-mjs`
 
 One-shot operator helper. Uploads the bundled `cuems-shutdown.js` (or a custom template) to
-a Shelly Pro 1 via its HTTP RPC. Patches `BRIDGE` and `TOKEN` literals inline before upload.
-Validates ASCII-only (Shelly's `Script.PutCode` rejects non-ASCII). Removes any pre-existing
-`cuems-shutdown` script, enables auto-start on Shelly boot, confirms running.
+a Shelly Pro 1 via its HTTP RPC. Patches `BRIDGE`, `TOKEN` and `CANCEL_GRACE_S` literals
+inline before upload. Validates ASCII-only (Shelly's `Script.PutCode` rejects non-ASCII).
+Removes any pre-existing `cuems-shutdown` script, enables auto-start on Shelly boot, confirms
+running.
 
 ```
 cuems-power-bridge-install-mjs --shelly <URL> --bridge <URL> [--token TOKEN]
-                                [--template PATH] [--name NAME]
+                                [--cancel-grace SECONDS] [--template PATH] [--name NAME]
 ```
 
 | Option | Default | Description |
@@ -762,6 +763,7 @@ cuems-power-bridge-install-mjs --shelly <URL> --bridge <URL> [--token TOKEN]
 | `--shelly` | (required) | Shelly base URL, e.g. `http://10.16.8.10` |
 | `--bridge` | (required) | Bridge URL the mJS will POST to, e.g. `http://controller.local:8478` |
 | `--token` | `""` | `X-Auth-Token` value (must match `shared_token` in `power-bridge.conf`) |
+| `--cancel-grace` | `5` | Seconds to wait after SW0→OFF before sending `/shutdown`; flip SW0 back ON within the window to cancel (`0` = no grace). Re-flash to change. |
 | `--template` | bundled `cuems-shutdown.js` | Path to a custom `.js` template |
 | `--name` | `cuems-shutdown` | Shelly script name |
 
@@ -850,6 +852,18 @@ Loading: package-data defaults first, then system file overrides on top.
 | Key | Default | Description |
 |---|---|---|
 | `network_map_path` | `/etc/cuems/network_map.xml` | Path to the CUEMS network map XML |
+
+#### Multi-subnet deployments
+
+`shelly_url`, the projectors (`projector.N.host`) and the cluster nodes may each live on a
+**different subnet/interface**. The bridge makes plain outbound TCP/HTTP and does not pin an
+interface — the kernel routes by destination IP — so this "just works" as long as the
+controller has a route to each subnet (an interface with an address on it, or a static
+route), configured in `/etc/network/interfaces`. No source-address binding is needed unless
+routing is genuinely ambiguous (overlapping ranges, multiple paths, or a device that filters
+by source IP). The config template (`power-bridge.conf.default`) carries a worked example
+with `ip route get` / reachability verification commands — keep that and this section in
+sync if you change the guidance.
 
 [↑ Back to Table of Contents](#table-of-contents)
 
@@ -1008,14 +1022,25 @@ let TOKEN  = "REPLACE-ME";                     // must match shared_token in pow
 **How the Shelly script works:**
 
 The script registers a status handler for `input:0`. When the wired flip-switch transitions
-to OFF (`delta.state === false`), the script fires an HTTP POST to `/shutdown`. An `inflight`
-boolean debounces the handler; a `Timer.set(10000)` clears it after 10 s in case the HTTP
-callback never fires. All bridge response codes (200, 409, 401, 503, 502) are logged to the
-Shelly console.
+to OFF (`delta.state === false`), the script does **not** POST immediately — it starts a
+`CANCEL_GRACE_S`-second one-shot timer (default 5, set via `--cancel-grace`). If the switch is
+flipped back ON (`delta.state === true`) within that window, the timer is cleared and **nothing
+is sent to the bridge** — an accidental or changed-mind flip is a no-op. Only if the switch is
+still OFF when the timer fires does the script POST `/shutdown`. Each OFF restarts the window,
+so a bouncy OFF/ON/OFF settles on a fresh countdown. An `inflight` boolean prevents a second
+POST while one is in flight (a `Timer.set(10000)` clears it after 10 s if the HTTP callback
+never fires); All bridge response codes (200, 409, 401, 503, 502) are logged to the Shelly
+console.
 
 The switch is a **flip-switch, not momentary**. `addStatusHandler` fires only on state
 deltas. Leaving the switch in OFF when applying mains is safe — no shutdown fires on boot.
-The operator must flip ON, then back OFF, to trigger.
+The operator must flip ON, then back OFF, to trigger. SW0 must be a **detached input** (it
+triggers the script, it does not drive the relay) so a flip never cuts mains directly.
+
+> **The grace/cancel window applies only to the physical switch.** A Bitfocus Companion
+> button (or any direct `POST /shutdown`) is committed immediately — the bridge has no
+> cancel/abort path once it starts. If you need a Stream-Deck reprieve, add a confirm step
+> in Companion, or treat the switch as the cancellable trigger.
 
 [↑ Back to Table of Contents](#table-of-contents)
 

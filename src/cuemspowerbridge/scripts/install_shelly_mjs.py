@@ -29,37 +29,34 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-import aiohttp
+# Single source of truth for the shipped grace default. Must match the
+# `let CANCEL_GRACE_S = 5;` literal in data/shelly-mjs/cuems-shutdown.js.
+DEFAULT_GRACE_S = 5
 
 
-def _patched_code(template: str, bridge: str, token: str, cancel_grace: int = 5) -> str:
-    """Patch the BRIDGE + TOKEN + CANCEL_GRACE_S literals in the template."""
+def _patched_code(template: str, bridge: str, token: str,
+                  cancel_grace: int = DEFAULT_GRACE_S) -> str:
+    """Patch the BRIDGE + TOKEN + CANCEL_GRACE_S literals in the template.
+
+    Each substitution is guarded by a PRE-replace check that the expected
+    literal is present, so a template drift (renamed/reformatted literal)
+    raises rather than silently shipping an unpatched value — uniformly for
+    all three, including TOKEN and the no-op CANCEL_GRACE_S=default case.
+    """
+    subs = [
+        ('let BRIDGE = "http://controller.local:8478";', f'let BRIDGE = "{bridge}";'),
+        ('let TOKEN  = "REPLACE-ME";', f'let TOKEN  = "{token}";'),
+        (f"let CANCEL_GRACE_S = {DEFAULT_GRACE_S};",
+         f"let CANCEL_GRACE_S = {int(cancel_grace)};"),
+    ]
     code = template
-    code = code.replace(
-        'let BRIDGE = "http://controller.local:8478";',
-        f'let BRIDGE = "{bridge}";',
-        1,
-    )
-    code = code.replace(
-        'let TOKEN  = "REPLACE-ME";',
-        f'let TOKEN  = "{token}";',
-        1,
-    )
-    code = code.replace(
-        "let CANCEL_GRACE_S = 5;",
-        f"let CANCEL_GRACE_S = {int(cancel_grace)};",
-        1,
-    )
-    if bridge not in code:
-        raise RuntimeError(
-            "patch failed: template doesn't contain the expected BRIDGE literal — "
-            "did the template change? Edit this script's _patched_code to match."
-        )
-    if f"let CANCEL_GRACE_S = {int(cancel_grace)};" not in code:
-        raise RuntimeError(
-            "patch failed: template doesn't contain the expected CANCEL_GRACE_S "
-            "literal — did the template change? Edit _patched_code to match."
-        )
+    for find, repl in subs:
+        if find not in code:
+            raise RuntimeError(
+                f"patch failed: template is missing the expected literal {find!r} "
+                "— did the template change? Update _patched_code to match."
+            )
+        code = code.replace(find, repl, 1)
     non_ascii = [c for c in code if ord(c) > 127]
     if non_ascii:
         raise RuntimeError(
@@ -93,6 +90,7 @@ async def _rpc(session: aiohttp.ClientSession, base: str, method: str, params: d
 
 async def install(shelly_url: str, code: str, name: str = "cuems-shutdown") -> int:
     """Upload + start the script. Returns the script id."""
+    import aiohttp  # deferred: keeps _patched_code/_load_template importable without aiohttp
     async with aiohttp.ClientSession() as s:
         # 1. Remove any existing script with the same name
         async with s.post(f"{shelly_url}/rpc/Script.List", json={}) as r:
@@ -158,9 +156,11 @@ def main() -> int:
                         help="Path to custom .js template (default: bundled cuems-shutdown.js)")
     parser.add_argument("--name", default="cuems-shutdown",
                         help="Shelly script name (default: cuems-shutdown)")
-    parser.add_argument("--cancel-grace", type=int, default=5, metavar="SECONDS",
+    parser.add_argument("--cancel-grace", type=int, default=DEFAULT_GRACE_S,
+                        metavar="SECONDS",
                         help="Grace window after SW0->OFF before /shutdown is sent; "
-                             "flip SW0 back ON within it to cancel (default: 5)")
+                             "flip SW0 back ON within it to cancel "
+                             f"(default: {DEFAULT_GRACE_S})")
     args = parser.parse_args()
 
     if args.cancel_grace < 0:

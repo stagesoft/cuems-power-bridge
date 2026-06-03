@@ -35,7 +35,7 @@ let graceTimer = null;                     // pending grace countdown (null = no
 
 function sendShutdown() {
   graceTimer = null;
-  if (inflight) return;
+  if (inflight) { print("[cuems] shutdown already in flight -- skipping"); return; }
   inflight = true;
   // Fail-safe: if the HTTP callback never fires (Shelly internal hang),
   // clear the lock after 10 s so future flips aren't permanently blocked.
@@ -72,22 +72,26 @@ Shelly.addStatusHandler(function (ev) {
   if (ev.delta.state === false) {
     // SW0 -> OFF: (re)start the cancellable grace countdown. Each OFF
     // restarts it, so a flip OFF/ON/OFF settles on a fresh window.
+    // If a shutdown is already in flight, don't queue another (the bridge
+    // would 409 it anyway) -- log so the operator gets feedback.
+    if (inflight) {
+      print("[cuems] SW0 OFF -- shutdown already in flight, ignoring");
+      return;
+    }
     if (graceTimer !== null) Timer.clear(graceTimer);
     print("[cuems] SW0 OFF -- shutting down in " + CANCEL_GRACE_S + "s (flip ON to cancel)");
     graceTimer = Timer.set(CANCEL_GRACE_S * 1000, false, sendShutdown);
     return;
   }
 
-  if (ev.delta.state === true) {
-    // SW0 -> ON within the grace window: cancel the pending shutdown.
-    // (If the window already elapsed and the bridge was asked, graceTimer
-    // is null and there's nothing to cancel here -- the bridge is committed.)
-    if (graceTimer !== null) {
-      Timer.clear(graceTimer);
-      graceTimer = null;
-      print("[cuems] SW0 back ON within grace -- shutdown cancelled");
-    }
-    return;
+  // ev.delta.state === true here (undefined + false already returned above).
+  // SW0 -> ON within the grace window: cancel the pending shutdown. If the
+  // window already elapsed and the bridge was asked, graceTimer is null and
+  // there's nothing to cancel -- the bridge is committed.
+  if (graceTimer !== null) {
+    Timer.clear(graceTimer);
+    graceTimer = null;
+    print("[cuems] SW0 back ON within grace -- shutdown cancelled");
   }
 });
 

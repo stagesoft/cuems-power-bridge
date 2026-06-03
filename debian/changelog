@@ -5,7 +5,14 @@ cuems-power-bridge (0.3.0-1) UNRELEASED; urgency=medium
     `cuems-power-bridge-install-mjs --cancel-grace N`) before POSTing
     /shutdown; flipping SW0 back ON within the window cancels it, so an
     accidental/changed-mind flip never reaches the bridge. Requires SW0 in
-    detached mode (already required by the arm-timer design).
+    detached mode (already required by the arm-timer design). The grace/cancel
+    applies to the physical switch only -- a Companion/direct POST /shutdown is
+    committed immediately (documented). Code-review hardening: the mJS logs and
+    skips a redundant OFF while a POST is in flight (no silent swallow); the
+    installer's literal patching is table-driven with a uniform pre-replace
+    guard for BRIDGE/TOKEN/CANCEL_GRACE_S (TOKEN was previously unguarded) and
+    the grace default is single-sourced; README updated; unit tests added for
+    the patching logic.
   * Add modular projector/display power control. New `displays/` subpackage:
     a `DisplayDriver` abstraction with a per-protocol registry, plus a
     `PJLinkDriver` (PJLink over TCP 4352) — covers the Epson EB-690SU /
