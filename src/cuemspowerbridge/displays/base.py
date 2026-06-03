@@ -35,6 +35,15 @@ class DisplayError(Exception):
     protocol/auth error, transport failure)."""
 
 
+class DisplayUnconfirmed(DisplayError):
+    """The command was sent but the device did not confirm the new state
+    within the retry budget (e.g. PJLink ERR3 while warming/cooling).
+
+    Distinct from a hard failure: the request was likely accepted but the
+    resulting power state is UNKNOWN, not the requested one. Callers must
+    NOT record the optimistic target state for the device."""
+
+
 @dataclass
 class DeviceDef:
     """One configured display device (from `projector.N.*` config keys)."""

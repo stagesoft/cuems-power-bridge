@@ -70,7 +70,7 @@ class Config:
     # and parsed by DisplayManager.from_config().
     projector_power_off_on_shutdown: bool = True
     projector_power_on_on_load: bool = True
-    projector_command_timeout_s: int = 5
+    projector_command_timeout_s: float = 5.0
 
     extras: dict = field(default_factory=dict)
 
@@ -108,6 +108,10 @@ def _coerce(name: str, raw: str, current):
     """Coerce raw string to the type matching the current field value."""
     if isinstance(current, bool):
         return raw.strip().lower() in ("true", "1", "yes", "on")
+    if isinstance(current, float):
+        # Check float before int — float fields accept "5" and "1.5";
+        # int(raw) would reject "1.5".
+        return float(raw)
     if isinstance(current, int):
         return int(raw)
     return raw

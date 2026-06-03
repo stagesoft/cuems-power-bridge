@@ -111,7 +111,7 @@ class Bridge:
             "nodes_pending": list(self._nodes_pending),
             "shelly_timer_armed_s": self.cfg.shelly_safety_timer_s,
             "last_error": self._last_error,
-            "projectors": self.displays.snapshot(),
+            "displays": self.displays.snapshot(),
         }
 
     # ------------------- HTTP handlers -------------------
@@ -229,18 +229,19 @@ class Bridge:
         ]
         await poweroff_all(targets, dry_run=self.cfg.dry_run)
 
-        # Step 6b: power off projectors/displays. Best-effort and bounded by
-        # the driver's short fail-fast retry profile — a stuck projector must
-        # NEVER abort or meaningfully delay the safety-critical sequence.
-        # power_off_all() already isolates per-device errors; the try/except
-        # is belt-and-braces.
+        # Step 6b: power off projectors/displays. First cancel any in-flight
+        # power-on so POWR 1 can't race our POWR 0 to the same device; then
+        # run the power-off CONCURRENTLY with the reachability poll below, so
+        # a slow/unreachable projector never adds latency to the
+        # safety-critical sequence. power_off_all() isolates per-device errors.
+        await self._cancel_projector_on_task()
+        projector_off_task: asyncio.Task | None = None
         if self.cfg.projector_power_off_on_shutdown and self.displays.configured:
-            try:
-                await self.displays.power_off_all()
-            except Exception:
-                log.exception("projector power-off failed; continuing shutdown")
+            projector_off_task = asyncio.create_task(
+                self.displays.power_off_all(), name="projector-power-off"
+            )
 
-        # Step 7: reachability poll.
+        # Step 7: reachability poll (projectors power off in parallel).
         if resolved:
             self._set_state("polling")
             result = await wait_until_all_down(
@@ -255,6 +256,18 @@ class Bridge:
                     "with stuck hosts: %s", result.elapsed_s,
                     ", ".join(result.stuck_hosts),
                 )
+
+        # Join the projector power-off, bounded so a hung projector cannot
+        # stall the sequence (cap = its full retry budget + margin).
+        if projector_off_task is not None:
+            budget = 3 * self.cfg.projector_command_timeout_s + 5
+            try:
+                await asyncio.wait_for(projector_off_task, timeout=budget)
+            except asyncio.TimeoutError:
+                log.warning("projector power-off exceeded %.0fs; continuing shutdown",
+                            budget)
+            except Exception:
+                log.exception("projector power-off failed; continuing shutdown")
 
         # Step 8: arm Shelly hardware safety timer.
         self._set_state("arming-shelly")
@@ -432,6 +445,32 @@ class Bridge:
             self.displays.power_on_all(), name="projector-power-on"
         )
 
+    async def _cancel_projector_on_task(self) -> None:
+        """Cancel any in-flight power-on task and wait for it to unwind.
+
+        Used on stop() and at the start of shutdown so a power-on in
+        progress can't race the power-off (POWR 1 vs POWR 0 to the same
+        device). Suppresses the cancelled task's CancelledError; logs any
+        real error.
+        """
+        t = self._projector_on_task
+        self._projector_on_task = None
+        if t is None or t.done():
+            return
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("projector power-on task errored during cancel")
+
+    def _on_engine_disconnect(self) -> None:
+        """Re-arm the load edge-detector when the engine connection drops, so
+        a reconnect's status dump is treated as a fresh load and re-asserts
+        projector power (otherwise the stale 'seen' flag would suppress it)."""
+        self._project_loaded_seen = False
+
     # ------------------- lifecycle -------------------
 
     async def start(self) -> web.AppRunner:
@@ -439,6 +478,7 @@ class Bridge:
         await self.editor.start()
         if self.cfg.projector_power_on_on_load and self.displays.configured:
             self.engine.on_status(self._on_engine_status)
+            self.engine.on_disconnect(self._on_engine_disconnect)
         asyncio.create_task(self._auto_load_loop(), name="auto-load")
         app = web.Application()
         app.router.add_get("/status", self.handle_status)
@@ -453,11 +493,6 @@ class Bridge:
         return runner
 
     async def stop(self) -> None:
-        if self._projector_on_task is not None and not self._projector_on_task.done():
-            self._projector_on_task.cancel()
-            try:
-                await self._projector_on_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await self._cancel_projector_on_task()
         await self.engine.stop()
         await self.editor.stop()

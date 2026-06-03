@@ -49,6 +49,8 @@ class EngineClient:
         self.connected: bool = False
         # Listeners called on every status update: cb(key, value).
         self._listeners: list[Callable[[str, Any], None]] = []
+        # Listeners called once each time an established connection drops.
+        self._disconnect_listeners: list[Callable[[], None]] = []
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -56,6 +58,13 @@ class EngineClient:
     def on_status(self, cb: Callable[[str, Any], None]) -> None:
         """Register a listener; called every time a /engine/status/* arrives."""
         self._listeners.append(cb)
+
+    def on_disconnect(self, cb: Callable[[], None]) -> None:
+        """Register a listener fired once when an established WS connection
+        drops (not on failed connect attempts). Lets callers re-arm
+        connection-scoped state so a reconnect's status dump is treated as
+        fresh."""
+        self._disconnect_listeners.append(cb)
 
     def is_known(self) -> bool:
         """True iff connected AND we have the on-connect state dump."""
@@ -131,11 +140,20 @@ class EngineClient:
             finally:
                 self._ws = None
                 # Mark cache UNKNOWN on disconnect — safety guard for /shutdown.
+                was_connected = self.connected
                 self.connected = False
                 self.running = UNKNOWN
                 self.armed = UNKNOWN
                 self.load = UNKNOWN
                 self.nextcue = UNKNOWN
+                # Fire disconnect listeners only on a real drop (we were
+                # connected), not on failed connect attempts.
+                if was_connected:
+                    for cb in self._disconnect_listeners:
+                        try:
+                            cb()
+                        except Exception as e:
+                            log.error("disconnect listener crashed: %s", e)
             if self._stop.is_set():
                 break
             try:

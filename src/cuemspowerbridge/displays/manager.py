@@ -20,7 +20,7 @@ import asyncio
 import logging
 import re
 
-from .base import DeviceDef, DisplayDriver, PowerState
+from .base import DeviceDef, DisplayDriver, DisplayUnconfirmed, PowerState
 from .pjlink import PJLinkDriver
 
 log = logging.getLogger(__name__)
@@ -91,12 +91,11 @@ class DisplayManager:
             DRIVERS[d.driver](d, timeout_s=timeout_s, dry_run=dry_run)
             for d in devices
         ]
-        # Last-known power snapshot for /status (label → state value). We
-        # never make a live network call inside /status; this is refreshed
-        # whenever a power action runs (and by status_all()).
-        self._snapshot: dict[str, str] = {
-            d.label(): PowerState.UNKNOWN.value for d in devices
-        }
+        # Last-known power state per device, index-aligned with _drivers (NOT
+        # keyed by label — two devices can share a label and must stay
+        # distinct). We never make a live network call inside /status; this is
+        # refreshed whenever a power action runs (and by status_all()).
+        self._states: list[PowerState] = [PowerState.UNKNOWN] * len(self._drivers)
 
     @classmethod
     def from_config(cls, cfg) -> "DisplayManager":
@@ -120,11 +119,12 @@ class DisplayManager:
         return bool(self._drivers)
 
     def snapshot(self) -> list[dict]:
-        """Informational power snapshot for the /status payload."""
-        return [{"name": name, "power": state}
-                for name, state in self._snapshot.items()]
+        """Informational power snapshot for the /status payload (cached;
+        no live network call). One entry per configured device, in order."""
+        return [{"name": drv.dev.label(), "power": self._states[i].value}
+                for i, drv in enumerate(self._drivers)]
 
-    async def _apply(self, action: str, on_ok: str) -> None:
+    async def _apply(self, action: str, on_ok: PowerState) -> None:
         if not self._drivers:
             return
 
@@ -137,35 +137,38 @@ class DisplayManager:
         results = await asyncio.gather(
             *(run(d) for d in self._drivers), return_exceptions=True
         )
-        for drv, res in zip(self._drivers, results):
+        for i, (drv, res) in enumerate(zip(self._drivers, results)):
             label = drv.dev.label()
-            if isinstance(res, Exception):
+            if isinstance(res, DisplayUnconfirmed):
+                # Command sent but state not confirmed (e.g. ERR3 warmup) —
+                # record UNKNOWN, not the optimistic target, and WARN.
+                log.warning("display %s: power %s unconfirmed: %s", label, action, res)
+                self._states[i] = PowerState.UNKNOWN
+            elif isinstance(res, Exception):
                 log.error("display %s: power %s failed: %s", label, action, res)
-                self._snapshot[label] = PowerState.UNKNOWN.value
+                self._states[i] = PowerState.UNKNOWN
             else:
-                self._snapshot[label] = on_ok
+                self._states[i] = on_ok
 
     async def power_on_all(self) -> None:
         log.info("powering ON %d display(s)%s",
                  len(self._drivers), " [dry_run]" if self.dry_run else "")
-        await self._apply("on", PowerState.ON.value)
+        await self._apply("on", PowerState.ON)
 
     async def power_off_all(self) -> None:
         log.info("powering OFF %d display(s)%s",
                  len(self._drivers), " [dry_run]" if self.dry_run else "")
-        await self._apply("off", PowerState.OFF.value)
+        await self._apply("off", PowerState.OFF)
 
-    async def status_all(self) -> dict[str, PowerState]:
-        """Query every device's power state in parallel; refresh snapshot."""
-        out: dict[str, PowerState] = {}
+    async def status_all(self) -> list[dict]:
+        """Query every device's power state in parallel, refresh the cache,
+        and return the same shape as snapshot() (so callers see one
+        consistent type for power state across both methods)."""
         if not self._drivers:
-            return out
+            return []
         results = await asyncio.gather(
             *(d.power_status() for d in self._drivers), return_exceptions=True
         )
-        for drv, res in zip(self._drivers, results):
-            label = drv.dev.label()
-            state = res if isinstance(res, PowerState) else PowerState.UNKNOWN
-            out[label] = state
-            self._snapshot[label] = state.value
-        return out
+        for i, res in enumerate(results):
+            self._states[i] = res if isinstance(res, PowerState) else PowerState.UNKNOWN
+        return self.snapshot()

@@ -36,7 +36,7 @@ import asyncio
 import hashlib
 import logging
 
-from .base import DeviceDef, DisplayDriver, DisplayError, PowerState
+from .base import DeviceDef, DisplayDriver, DisplayError, DisplayUnconfirmed, PowerState
 
 log = logging.getLogger(__name__)
 
@@ -137,41 +137,39 @@ class PJLinkDriver(DisplayDriver):
         if self.dry_run:
             log.info("[dry_run] PJLink %s: would send POWR %s", self.dev.label(), value)
             return
-        last: Exception | None = None
-        for attempt in range(len(_RETRY_DELAYS) + 1):
+        attempts = len(_RETRY_DELAYS) + 1
+        for attempt in range(attempts):
+            last_attempt = attempt == attempts - 1
             try:
                 payload = await self._command(f"POWR {value}")
             except PJLinkError as e:
-                last = e
-                if attempt < len(_RETRY_DELAYS):
-                    log.warning("PJLink %s POWR %s attempt %d failed: %s; retry in %ds",
-                                self.dev.label(), value, attempt + 1, e,
-                                _RETRY_DELAYS[attempt])
-                    await asyncio.sleep(_RETRY_DELAYS[attempt])
-                    continue
-                raise
+                if last_attempt:
+                    raise
+                log.warning("PJLink %s POWR %s attempt %d failed: %s; retry in %ds",
+                            self.dev.label(), value, attempt + 1, e,
+                            _RETRY_DELAYS[attempt])
+                await asyncio.sleep(_RETRY_DELAYS[attempt])
+                continue
             if payload == "OK":
                 log.info("PJLink %s: POWR %s OK", self.dev.label(), value)
                 return
             if payload == "ERR3":
                 # Unavailable now (warming up / cooling down). Retry within
-                # budget; if it persists treat as "issued, verify later" and
-                # WARN (not ERROR) — a 30-60 s warmup legitimately outlasts us.
-                last = PJLinkError(f"{self.dev.label()}: ERR3 (busy/warming)")
-                if attempt < len(_RETRY_DELAYS):
-                    await asyncio.sleep(_RETRY_DELAYS[attempt])
-                    continue
-                log.warning(
-                    "PJLink %s: POWR %s still ERR3 after retries — command "
-                    "issued, projector likely warming/cooling; verify later",
-                    self.dev.label(), value,
-                )
-                return
+                # budget; if it persists the command was likely accepted but
+                # the state is unconfirmed — raise DisplayUnconfirmed so the
+                # caller records UNKNOWN (not the optimistic target) rather
+                # than silently claiming success. A 30-60 s warmup legitimately
+                # outlasts our retry budget.
+                if last_attempt:
+                    raise DisplayUnconfirmed(
+                        f"{self.dev.label()}: POWR {value} unconfirmed — ERR3 "
+                        "(busy/warming) after retries"
+                    )
+                await asyncio.sleep(_RETRY_DELAYS[attempt])
+                continue
             # ERR1 (bad command) / ERR2 (bad param) / ERR4 (projector fault):
             # hard, not retryable.
             raise PJLinkError(f"{self.dev.label()}: POWR {value} returned {payload}")
-        if last:  # pragma: no cover - defensive
-            raise last
 
     async def power_status(self) -> PowerState:
         if self.dry_run:

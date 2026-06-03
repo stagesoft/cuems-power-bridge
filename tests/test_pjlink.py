@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 
 import cuemspowerbridge.displays.pjlink as pjlink_mod
-from cuemspowerbridge.displays.base import DeviceDef, PowerState
+from cuemspowerbridge.displays.base import DeviceDef, DisplayUnconfirmed, PowerState
 from cuemspowerbridge.displays.pjlink import PJLinkDriver, PJLinkError
 
 import pytest
@@ -117,7 +117,7 @@ async def test_crlf_terminators_status():
     assert state == PowerState.ON
 
 
-async def test_err3_retries_then_warns(monkeypatch):
+async def test_err3_exhaustion_raises_unconfirmed(monkeypatch):
     monkeypatch.setattr(pjlink_mod, "_RETRY_DELAYS", (0, 0))
     calls = {"n": 0}
 
@@ -132,8 +132,10 @@ async def test_err3_retries_then_warns(monkeypatch):
 
     server, port = await _serve(handler)
     async with server:
-        # ERR3 to exhaustion is "issued, verify later" — must NOT raise.
-        await _driver(port).power_on()
+        # ERR3 to exhaustion = "sent but unconfirmed" → raises so the caller
+        # records UNKNOWN rather than claiming success.
+        with pytest.raises(DisplayUnconfirmed):
+            await _driver(port).power_on()
     assert calls["n"] == 3  # initial + 2 retries (connect-per-command)
 
 

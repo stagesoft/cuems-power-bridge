@@ -20,6 +20,15 @@ cuems-power-bridge (0.3.0-1) UNRELEASED; urgency=medium
     parsing, and manager fan-out isolation.
   * Operator note: a projector needs "Standby Mode Communications = ON"
     (network standby) + PJLink enabled for power-ON from a fully-off state.
+  * Hardening (code review): cancel an in-flight power-on before powering
+    off so POWR 1 can't race POWR 0 during shutdown; run the shutdown
+    power-off concurrently with the node reachability poll, bounded so a
+    hung projector can't stall shutdown; PJLink ERR3-to-exhaustion now
+    raises DisplayUnconfirmed so /status reports UNKNOWN (not a false
+    "off"); re-arm projector power-on across an engine reconnect;
+    projector_command_timeout_s accepts fractional seconds; per-device
+    state is index-aligned (duplicate display labels no longer collapse);
+    /status key renamed `projectors` -> `displays`.
 
  -- Ion Reguera <ion@stagelab.coop>  Wed, 03 Jun 2026 16:16:48 +0200
 
