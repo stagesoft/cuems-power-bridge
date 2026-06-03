@@ -50,7 +50,7 @@ dry_run = false                           # true = log side-effects without exec
 unresolvable_nodes_policy = skip          # nodes with no role_id/alias/hostname: log ERROR + skip
 
 # --- SSH to nodes ---
-ssh_user = cuems
+ssh_user = cuems-admin
 ssh_key = /etc/cuems/power-bridge.key
 poweroff_cmd = sudo /sbin/poweroff
 # Optional split for the local controller. Empty → use poweroff_cmd above.

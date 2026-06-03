@@ -46,7 +46,7 @@ class Config:
     unresolvable_nodes_policy: str = "skip"
 
     # SSH
-    ssh_user: str = "cuems"
+    ssh_user: str = "cuems-admin"
     ssh_key: str = "/etc/cuems/power-bridge.key"
     poweroff_cmd: str = "sudo /sbin/poweroff"
     # Optional override for the LOCAL controller poweroff. Empty → fall back

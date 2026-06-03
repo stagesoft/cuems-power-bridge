@@ -43,6 +43,13 @@ cuems-power-bridge (0.3.0-1) UNRELEASED; urgency=medium
     state is index-aligned (duplicate display labels no longer collapse);
     /status key renamed `projectors` -> `displays`.
 
+  * shutdown SSH: connect to nodes as cuems-admin (the new default ssh_user)
+    instead of the nologin cuems service user, so the unattended
+    `sudo /sbin/poweroff` can exec. deploy_keys.py rewritten: connects AS
+    ssh_user and writes that user's own ~/.ssh/authorized_keys (no sudo, so no
+    password hang), locking the bridge key with
+    `restrict,command="sudo /sbin/poweroff"`. Idempotent (replaces any prior
+    entry for the key). Pairs with cuems-common 99-cuems-admin-poweroff.
  -- Ion Reguera <ion@stagelab.coop>  Wed, 03 Jun 2026 16:16:48 +0200
 
 cuems-power-bridge (0.2.6-1) UNRELEASED; urgency=medium
