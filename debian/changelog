@@ -1,3 +1,28 @@
+cuems-power-bridge (0.3.0-1) UNRELEASED; urgency=medium
+
+  * Add modular projector/display power control. New `displays/` subpackage:
+    a `DisplayDriver` abstraction with a per-protocol registry, plus a
+    `PJLinkDriver` (PJLink over TCP 4352) — covers the Epson EB-690SU /
+    EB-815E and most other PJLink projectors. `DisplayManager` fans
+    power on/off/status across the configured fleet concurrently, with
+    per-device error isolation.
+  * Lifecycle integration: projectors power ON when the engine reports a
+    project loaded (engine-status listener, edge-detected) and OFF as part
+    of the orderly /shutdown sequence. Projector failures are logged and
+    never abort or delay the safety-critical shutdown.
+  * Config: new globals `projector_power_on_on_load`,
+    `projector_power_off_on_shutdown`, `projector_command_timeout_s`, and
+    per-device `projector.N.{host,driver,name,port,password}` keys.
+  * New diagnostic CLI `cuems-power-bridge-test-projector <host>
+    {status|on|off}` for bring-up (with /usr/bin shim).
+  * /status payload gains a `projectors` array (cached snapshot, no live
+    network call). Unit tests for PJLink framing/auth/CRLF/ERR3, config
+    parsing, and manager fan-out isolation.
+  * Operator note: a projector needs "Standby Mode Communications = ON"
+    (network standby) + PJLink enabled for power-ON from a fully-off state.
+
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 03 Jun 2026 16:16:48 +0200
+
 cuems-power-bridge (0.2.6-1) UNRELEASED; urgency=medium
 
   * Complete the rename from cuems-wsclient to cuems-power-bridge, begun

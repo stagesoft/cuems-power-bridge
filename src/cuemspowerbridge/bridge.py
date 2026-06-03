@@ -20,6 +20,7 @@ from aiohttp import web
 
 from . import network_map
 from .config import Config
+from .displays.manager import DisplayManager
 from .editor_client import EditorClient
 from .engine_state import EngineClient
 from .node_executor import SshTarget, poweroff_all
@@ -66,6 +67,12 @@ class Bridge:
             username=cfg.shelly_username,
             password=cfg.shelly_password,
         )
+        self.displays = DisplayManager.from_config(cfg)
+        # Projector power-on is fired (fire-and-forget) when the engine
+        # reports a project loaded; we keep the task handle to cancel it on
+        # stop() and to suppress duplicate spawns on engine reconnects.
+        self._projector_on_task: asyncio.Task | None = None
+        self._project_loaded_seen = False
         self._shutdown_lock = asyncio.Lock()
         self._auto_load_done = False
         self._auto_load_failures = 0
@@ -104,6 +111,7 @@ class Bridge:
             "nodes_pending": list(self._nodes_pending),
             "shelly_timer_armed_s": self.cfg.shelly_safety_timer_s,
             "last_error": self._last_error,
+            "projectors": self.displays.snapshot(),
         }
 
     # ------------------- HTTP handlers -------------------
@@ -220,6 +228,17 @@ class Bridge:
             for h in resolved
         ]
         await poweroff_all(targets, dry_run=self.cfg.dry_run)
+
+        # Step 6b: power off projectors/displays. Best-effort and bounded by
+        # the driver's short fail-fast retry profile — a stuck projector must
+        # NEVER abort or meaningfully delay the safety-critical sequence.
+        # power_off_all() already isolates per-device errors; the try/except
+        # is belt-and-braces.
+        if self.cfg.projector_power_off_on_shutdown and self.displays.configured:
+            try:
+                await self.displays.power_off_all()
+            except Exception:
+                log.exception("projector power-off failed; continuing shutdown")
 
         # Step 7: reachability poll.
         if resolved:
@@ -383,11 +402,43 @@ class Bridge:
             log.error("auto-load: 3 consecutive failures, disabling for session")
             self._auto_load_disabled = True
 
+    # ------------------- projector power-on -------------------
+
+    def _on_engine_status(self, key: str, value: Any) -> None:
+        """Engine status listener: power displays ON when a project loads.
+
+        Called synchronously from the engine WS read loop for EVERY
+        /engine/status/* key, so it must stay fast and not block. We act
+        only on the `load` key, and read the COERCED cache (self.engine.load,
+        set before listeners fire) rather than the raw `value` arg — `value`
+        is None for empty/impulse frames.
+        """
+        if key != "load":
+            return
+        loaded = self.engine.project_loaded()
+        if loaded and not self._project_loaded_seen:
+            self._project_loaded_seen = True
+            self._spawn_projector_power_on()
+        elif not loaded:
+            # Back to no project — re-arm so the next load powers on again.
+            self._project_loaded_seen = False
+
+    def _spawn_projector_power_on(self) -> None:
+        if self._projector_on_task is not None and not self._projector_on_task.done():
+            log.debug("projector power-on already in progress; skipping duplicate")
+            return
+        log.info("project loaded → powering on displays")
+        self._projector_on_task = asyncio.create_task(
+            self.displays.power_on_all(), name="projector-power-on"
+        )
+
     # ------------------- lifecycle -------------------
 
     async def start(self) -> web.AppRunner:
         await self.engine.start()
         await self.editor.start()
+        if self.cfg.projector_power_on_on_load and self.displays.configured:
+            self.engine.on_status(self._on_engine_status)
         asyncio.create_task(self._auto_load_loop(), name="auto-load")
         app = web.Application()
         app.router.add_get("/status", self.handle_status)
@@ -402,5 +453,11 @@ class Bridge:
         return runner
 
     async def stop(self) -> None:
+        if self._projector_on_task is not None and not self._projector_on_task.done():
+            self._projector_on_task.cancel()
+            try:
+                await self._projector_on_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await self.engine.stop()
         await self.editor.stop()

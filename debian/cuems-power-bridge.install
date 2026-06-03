@@ -9,3 +9,4 @@ src/cuemspowerbridge/data/shelly-mjs/cuems-shutdown.js usr/share/cuems/shelly-mj
 data/bin/cuems-power-bridge usr/bin/
 data/bin/cuems-power-bridge-deploy-keys usr/bin/
 data/bin/cuems-power-bridge-install-mjs usr/bin/
+data/bin/cuems-power-bridge-test-projector usr/bin/

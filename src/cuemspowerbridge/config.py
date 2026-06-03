@@ -65,6 +65,13 @@ class Config:
     # network_map
     network_map_path: str = "/etc/cuems/network_map.xml"
 
+    # Projectors / displays (see the displays/ subpackage). Global toggles
+    # here; per-device config is in projector.N.* keys, captured in `extras`
+    # and parsed by DisplayManager.from_config().
+    projector_power_off_on_shutdown: bool = True
+    projector_power_on_on_load: bool = True
+    projector_command_timeout_s: int = 5
+
     extras: dict = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -90,6 +97,11 @@ class Config:
             raise ValueError(f"engine_ws_url must be ws(s):// — got {self.engine_ws_url!r}")
         if not self.editor_ws_url.startswith(("ws://", "wss://")):
             raise ValueError(f"editor_ws_url must be ws(s):// — got {self.editor_ws_url!r}")
+        if self.projector_command_timeout_s <= 0:
+            raise ValueError(
+                f"projector_command_timeout_s={self.projector_command_timeout_s} "
+                "must be > 0 (0 makes every projector command time out instantly)"
+            )
 
 
 def _coerce(name: str, raw: str, current):

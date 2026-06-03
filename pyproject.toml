@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "cuemspowerbridge"
-version = "0.2.6"
+version = "0.3.0"
 description = "CUEMS power bridge: Shelly + Companion shutdown coordinator and engine WebSocket client"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -48,6 +48,7 @@ pytest-mock = "*"
 cuems-power-bridge = "cuemspowerbridge.scripts.power_bridge:main"
 cuems-power-bridge-deploy-keys = "cuemspowerbridge.scripts.deploy_keys:main"
 cuems-power-bridge-install-mjs = "cuemspowerbridge.scripts.install_shelly_mjs:main"
+cuems-power-bridge-test-projector = "cuemspowerbridge.scripts.test_projector:main"
 cuems-wsclient = "cuemspowerbridge.wsclient:main_cli"
 
 [tool.pytest.ini_options]
