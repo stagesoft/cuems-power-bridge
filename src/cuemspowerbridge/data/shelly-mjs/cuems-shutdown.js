@@ -3,11 +3,16 @@
 // Installs into the Shelly's Scripts tab via the device web UI. Edit
 // BRIDGE and TOKEN below for your deployment, then click "Save" and
 // "Start". The script then sleeps until the wired flip-switch on SW
-// input 0 transitions to OFF, at which point it asks the controller's
-// power bridge to do an orderly cluster shutdown. The bridge arms a
-// hardware safety timer on this Shelly which opens the relay (cuts
-// mains) after the configured number of seconds -- even if the bridge
-// itself disappears mid-shutdown, the Shelly will still cut power.
+// input 0 transitions to OFF, waits a short cancellable grace window,
+// and then asks the controller's power bridge to do an orderly cluster
+// shutdown. The bridge arms a hardware safety timer on this Shelly which
+// opens the relay (cuts mains) after the configured number of seconds --
+// even if the bridge itself disappears mid-shutdown, the Shelly will
+// still cut power.
+//
+// SW0 must be configured as a DETACHED input (it triggers this script;
+// it does NOT directly switch the relay) -- otherwise flipping OFF would
+// cut the controller's mains instantly, defeating the orderly shutdown.
 //
 // SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -20,12 +25,16 @@
 // Always use the alias of the interface that's on the Shelly's L2.
 let BRIDGE = "http://controller.local:8478";
 let TOKEN  = "REPLACE-ME";                 // matches power-bridge.conf shared_token
-let inflight = false;                      // simple debounce guard
+let CANCEL_GRACE_S = 5;                    // after SW0 -> OFF, wait this many
+                                           // seconds before asking the bridge to
+                                           // shut down; flip SW0 back ON within
+                                           // the window to cancel (accidental or
+                                           // changed-mind flip -> nothing happens).
+let inflight = false;                      // guard while a /shutdown POST is in flight
+let graceTimer = null;                     // pending grace countdown (null = none)
 
-Shelly.addStatusHandler(function (ev) {
-  if (ev.component !== "input:0") return;
-  if (ev.delta.state === undefined) return;
-  if (ev.delta.state !== false) return;    // only react on flip -> OFF
+function sendShutdown() {
+  graceTimer = null;
   if (inflight) return;
   inflight = true;
   // Fail-safe: if the HTTP callback never fires (Shelly internal hang),
@@ -54,6 +63,32 @@ Shelly.addStatusHandler(function (ev) {
     if (r.code === 502) { print("[cuems] bridge could not reach engine/Shelly: " + r.body); return; }
     print("[cuems] unexpected response " + r.code + ": " + r.body);
   });
+}
+
+Shelly.addStatusHandler(function (ev) {
+  if (ev.component !== "input:0") return;
+  if (ev.delta.state === undefined) return;
+
+  if (ev.delta.state === false) {
+    // SW0 -> OFF: (re)start the cancellable grace countdown. Each OFF
+    // restarts it, so a flip OFF/ON/OFF settles on a fresh window.
+    if (graceTimer !== null) Timer.clear(graceTimer);
+    print("[cuems] SW0 OFF -- shutting down in " + CANCEL_GRACE_S + "s (flip ON to cancel)");
+    graceTimer = Timer.set(CANCEL_GRACE_S * 1000, false, sendShutdown);
+    return;
+  }
+
+  if (ev.delta.state === true) {
+    // SW0 -> ON within the grace window: cancel the pending shutdown.
+    // (If the window already elapsed and the bridge was asked, graceTimer
+    // is null and there's nothing to cancel here -- the bridge is committed.)
+    if (graceTimer !== null) {
+      Timer.clear(graceTimer);
+      graceTimer = null;
+      print("[cuems] SW0 back ON within grace -- shutdown cancelled");
+    }
+    return;
+  }
 });
 
-print("[cuems] cuems-shutdown.js armed -- flip SW0 OFF to initiate orderly shutdown");
+print("[cuems] cuems-shutdown.js armed -- flip SW0 OFF to initiate orderly shutdown (" + CANCEL_GRACE_S + "s grace)");

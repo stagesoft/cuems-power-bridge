@@ -1,5 +1,11 @@
 cuems-power-bridge (0.3.0-1) UNRELEASED; urgency=medium
 
+  * shelly-mjs: add a cancellable grace window. After SW0 -> OFF the script
+    waits CANCEL_GRACE_S seconds (default 5, set via
+    `cuems-power-bridge-install-mjs --cancel-grace N`) before POSTing
+    /shutdown; flipping SW0 back ON within the window cancels it, so an
+    accidental/changed-mind flip never reaches the bridge. Requires SW0 in
+    detached mode (already required by the arm-timer design).
   * Add modular projector/display power control. New `displays/` subpackage:
     a `DisplayDriver` abstraction with a per-protocol registry, plus a
     `PJLinkDriver` (PJLink over TCP 4352) — covers the Epson EB-690SU /

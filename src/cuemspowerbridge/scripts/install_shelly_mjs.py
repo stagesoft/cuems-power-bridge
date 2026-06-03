@@ -32,8 +32,8 @@ from pathlib import Path
 import aiohttp
 
 
-def _patched_code(template: str, bridge: str, token: str) -> str:
-    """Patch the BRIDGE + TOKEN literals in the shipped template."""
+def _patched_code(template: str, bridge: str, token: str, cancel_grace: int = 5) -> str:
+    """Patch the BRIDGE + TOKEN + CANCEL_GRACE_S literals in the template."""
     code = template
     code = code.replace(
         'let BRIDGE = "http://controller.local:8478";',
@@ -45,10 +45,20 @@ def _patched_code(template: str, bridge: str, token: str) -> str:
         f'let TOKEN  = "{token}";',
         1,
     )
+    code = code.replace(
+        "let CANCEL_GRACE_S = 5;",
+        f"let CANCEL_GRACE_S = {int(cancel_grace)};",
+        1,
+    )
     if bridge not in code:
         raise RuntimeError(
             "patch failed: template doesn't contain the expected BRIDGE literal — "
             "did the template change? Edit this script's _patched_code to match."
+        )
+    if f"let CANCEL_GRACE_S = {int(cancel_grace)};" not in code:
+        raise RuntimeError(
+            "patch failed: template doesn't contain the expected CANCEL_GRACE_S "
+            "literal — did the template change? Edit _patched_code to match."
         )
     non_ascii = [c for c in code if ord(c) > 127]
     if non_ascii:
@@ -148,11 +158,20 @@ def main() -> int:
                         help="Path to custom .js template (default: bundled cuems-shutdown.js)")
     parser.add_argument("--name", default="cuems-shutdown",
                         help="Shelly script name (default: cuems-shutdown)")
+    parser.add_argument("--cancel-grace", type=int, default=5, metavar="SECONDS",
+                        help="Grace window after SW0->OFF before /shutdown is sent; "
+                             "flip SW0 back ON within it to cancel (default: 5)")
     args = parser.parse_args()
 
+    if args.cancel_grace < 0:
+        print("ERROR: --cancel-grace must be >= 0", file=sys.stderr)
+        return 1
+
     template = _load_template(args.template)
-    code = _patched_code(template, args.bridge, args.token)
-    print(f"Patched code: {len(code)} bytes, BRIDGE={args.bridge}, TOKEN={'(set)' if args.token else '(empty)'}")
+    code = _patched_code(template, args.bridge, args.token, args.cancel_grace)
+    print(f"Patched code: {len(code)} bytes, BRIDGE={args.bridge}, "
+          f"TOKEN={'(set)' if args.token else '(empty)'}, "
+          f"cancel_grace={args.cancel_grace}s")
     print(f"Installing on {args.shelly} ...")
     try:
         asyncio.run(install(args.shelly, code, args.name))
