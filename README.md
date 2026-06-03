@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 ***
 -->
 
-# cuems-wsclient
+# cuems-power-bridge
 
 **Current release: v0.2.0** (development / pre-release) — see [CHANGELOG.md](./CHANGELOG.md).
 
@@ -14,9 +14,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org)
 
-* **Source / issues:** [stagesoft/cuems-wsclient](https://github.com/stagesoft/cuems-wsclient) on GitHub
+* **Source / issues:** [stagesoft/cuems-power-bridge](https://github.com/stagesoft/cuems-power-bridge) on GitHub
 
-`cuems-wsclient` ships the **cuems-power-bridge** daemon: an asyncio HTTP server that
+**cuems-power-bridge** daemon: an asyncio HTTP server that
 coordinates orderly shutdown of a CUEMS multi-node audio/video production cluster when an
 operator flips a wired Shelly Pro 1 power switch or presses a button on a Bitfocus Companion
 Stream Deck. It also proxies GO and STOP commands from Companion's HTTP module into the binary
