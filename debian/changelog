@@ -1,3 +1,21 @@
+cuems-power-bridge (0.2.6-1) UNRELEASED; urgency=medium
+
+  * Complete the rename from cuems-wsclient to cuems-power-bridge, begun
+    at 0.2.0 (which renamed only the binary package, console entries and
+    operator-facing strings). This release renames the remaining
+    internals:
+    - Debian source package: cuems-wsclient -> cuems-power-bridge.
+    - Python import package: cuemswsclient -> cuemspowerbridge
+      (src/ layout, all intra-package imports, entry-point targets and
+      importlib.resources package-data lookups updated to match).
+    - Git repository / Homepage URL -> github.com/stagesoft/cuems-power-bridge.
+  * The legacy `cuems-wsclient` console entry point is retained (now
+    targeting cuemspowerbridge.wsclient:main_cli) for backwards compat.
+  * No runtime behaviour change; pure rename. Older changelog entries
+    below keep the historical cuems-wsclient source name.
+
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 03 Jun 2026 13:58:44 +0200
+
 cuems-wsclient (0.2.5-1) UNRELEASED; urgency=medium
 
   * shelly-mjs: replace em-dash (U+2014) with `--` in the formitgo.local

@@ -64,7 +64,7 @@ def _load_template(custom_path: str | None) -> str:
         return Path(custom_path).read_text(encoding="utf-8")
     # Bundled with the package
     return (
-        resources.files("cuemswsclient.data.shelly-mjs")
+        resources.files("cuemspowerbridge.data.shelly-mjs")
         .joinpath("cuems-shutdown.js")
         .read_text(encoding="utf-8")
     )

@@ -5,7 +5,7 @@
 """Config loader for /etc/cuems/power-bridge.conf.
 
 Plain key=value (matching cuems-midi-connector style). Falls back to the
-package-data default at src/cuemswsclient/data/power-bridge.conf.default
+package-data default at src/cuemspowerbridge/data/power-bridge.conf.default
 if the system file is absent (useful for unit tests).
 """
 
@@ -127,7 +127,7 @@ def load(path: str | None = None) -> Config:
     cfg = Config()
     # 1) bundled defaults — best-effort
     try:
-        default_text = resources.files("cuemswsclient.data").joinpath(
+        default_text = resources.files("cuemspowerbridge.data").joinpath(
             "power-bridge.conf.default"
         ).read_text()
         _parse(default_text, cfg)

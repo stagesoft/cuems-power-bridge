@@ -1,7 +1,12 @@
-# cuems-wsclient
+# cuems-power-bridge
 
 CUEMS WebSocket client utilities and the **cuems-power-bridge** daemon
 (Shelly Pro 1 / Bitfocus Companion shutdown coordinator).
+
+> Renamed from `cuems-wsclient` (Python package `cuemswsclient`) at 0.2.6.
+> The repo, source package and import package are now `cuems-power-bridge`
+> / `cuemspowerbridge`. The legacy `cuems-wsclient` console entry point is
+> kept for backwards compatibility.
 
 ## What this repo contains
 
@@ -74,7 +79,7 @@ Bad UUID → editor returns `{"type": "error", "action": "project_ready"}` → c
 - `auto_load_project` (project UUID to auto-load on boot)
 - `shelly_safety_timer_s` (45..300; default 60)
 
-See `src/cuemswsclient/data/power-bridge.conf.default` for the full list.
+See `src/cuemspowerbridge/data/power-bridge.conf.default` for the full list.
 
 ## Shelly mJS template
 

@@ -1,4 +1,4 @@
-Source: cuems-wsclient
+Source: cuems-power-bridge
 Section: python
 Priority: optional
 Maintainer: Ion Reguera <ion@stagelab.coop>
@@ -9,7 +9,7 @@ Build-Depends: debhelper-compat (= 13),
                python3-pip,
                python3-dev
 Standards-Version: 4.6.0
-Homepage: https://github.com/stagesoft/cuems-wsclient
+Homepage: https://github.com/stagesoft/cuems-power-bridge
 
 Package: cuems-power-bridge
 Architecture: all

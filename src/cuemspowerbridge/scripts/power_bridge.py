@@ -13,8 +13,8 @@ import os
 import signal
 import sys
 
-from cuemswsclient.bridge import Bridge
-from cuemswsclient.config import load as load_config
+from cuemspowerbridge.bridge import Bridge
+from cuemspowerbridge.config import load as load_config
 
 log = logging.getLogger(__name__)
 

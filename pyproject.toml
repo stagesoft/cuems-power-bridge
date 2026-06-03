@@ -3,8 +3,8 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-name = "cuemswsclient"
-version = "0.2.0"
+name = "cuemspowerbridge"
+version = "0.2.6"
 description = "CUEMS power bridge: Shelly + Companion shutdown coordinator and engine WebSocket client"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -18,11 +18,11 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
     "Topic :: System :: Power (UPS)",
 ]
-repository = "https://github.com/stagesoft/cuems-wsclient"
-homepage = "https://github.com/stagesoft/cuems-wsclient"
+repository = "https://github.com/stagesoft/cuems-power-bridge"
+homepage = "https://github.com/stagesoft/cuems-power-bridge"
 
 [[tool.poetry.packages]]
-include = "cuemswsclient"
+include = "cuemspowerbridge"
 from = "src"
 
 [tool.poetry.dependencies]
@@ -45,10 +45,10 @@ pytest-asyncio = "*"
 pytest-mock = "*"
 
 [tool.poetry.scripts]
-cuems-power-bridge = "cuemswsclient.scripts.power_bridge:main"
-cuems-power-bridge-deploy-keys = "cuemswsclient.scripts.deploy_keys:main"
-cuems-power-bridge-install-mjs = "cuemswsclient.scripts.install_shelly_mjs:main"
-cuems-wsclient = "cuemswsclient.wsclient:main_cli"
+cuems-power-bridge = "cuemspowerbridge.scripts.power_bridge:main"
+cuems-power-bridge-deploy-keys = "cuemspowerbridge.scripts.deploy_keys:main"
+cuems-power-bridge-install-mjs = "cuemspowerbridge.scripts.install_shelly_mjs:main"
+cuems-wsclient = "cuemspowerbridge.wsclient:main_cli"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
