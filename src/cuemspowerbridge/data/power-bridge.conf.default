@@ -4,6 +4,30 @@
 # Operator-edited config lives at /etc/cuems/power-bridge.conf and
 # overrides the values here.
 
+# --- Network topology (multi-subnet) ---
+# shelly_url, projector.N.host and the cluster nodes may each live on a
+# DIFFERENT subnet/interface. The bridge makes plain outbound TCP/HTTP
+# connections and does NOT pin an interface — the kernel routes by
+# destination IP. So separate subnets "just work" as long as the
+# controller has a route to each: give it an interface (or static route)
+# on every subnet via /etc/cuems network config (/etc/network/interfaces),
+# then set the IPs below accordingly. Example — projectors on their own
+# AV-control LAN, Shelly on another:
+#   # /etc/network/interfaces
+#   auto eth2                      # projector LAN
+#   iface eth2 inet static
+#       address 192.168.10.1/24
+#   auto eth3                      # Shelly LAN
+#   iface eth3 inet static
+#       address 192.168.20.1/24
+# Then: shelly_url = http://192.168.20.50 and projector.1.host = 192.168.10.21
+# Verify routing picks the right NIC:  ip route get 192.168.10.21
+# Verify reachability:  cuems-power-bridge-test-projector 192.168.10.21 status
+#                       curl http://192.168.20.50/rpc/Shelly.GetStatus
+# (Only if routing is AMBIGUOUS — overlapping ranges, multiple paths, or a
+# device that filters by source IP — would the bridge need source-address
+# binding; it does not today. Raise it if you hit that case.)
+
 # --- Shelly endpoint ---
 shelly_url = http://192.168.6.2          # IP, not .local (Shelly's DNS is unreliable)
 shelly_username =                         # optional digest auth user
