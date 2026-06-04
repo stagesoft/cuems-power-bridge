@@ -13,6 +13,9 @@
 // SW0 must be configured as a DETACHED input (it triggers this script;
 // it does NOT directly switch the relay) -- otherwise flipping OFF would
 // cut the controller's mains instantly, defeating the orderly shutdown.
+// On the flip back to ON (no shutdown pending) this script re-closes the
+// relay to restore mains, so the cluster powers on again (with BIOS
+// power-on-after-AC-loss = ON). That is the "relay on -> machines boot" path.
 //
 // SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -41,7 +44,12 @@ function sendShutdown() {
   // clear the lock after 10 s so future flips aren't permanently blocked.
   Timer.set(10000, false, function () { inflight = false; });
 
-  Shelly.call("HTTP.POST", {
+  // NB: HTTP.Request, NOT HTTP.POST. Shelly's HTTP.POST only honors a
+  // `content_type` field and SILENTLY DROPS a custom `headers` map -- so
+  // X-Auth-Token never gets sent and the bridge rejects with 401 bad_token.
+  // HTTP.Request is the only HTTP method that transmits arbitrary headers.
+  Shelly.call("HTTP.Request", {
+    method: "POST",
     url: BRIDGE + "/shutdown",
     body: "{}",
     headers: {"X-Auth-Token": TOKEN, "Content-Type": "application/json"}
@@ -85,14 +93,24 @@ Shelly.addStatusHandler(function (ev) {
   }
 
   // ev.delta.state === true here (undefined + false already returned above).
-  // SW0 -> ON within the grace window: cancel the pending shutdown. If the
-  // window already elapsed and the bridge was asked, graceTimer is null and
-  // there's nothing to cancel -- the bridge is committed.
   if (graceTimer !== null) {
+    // SW0 -> ON within the grace window: cancel the pending shutdown. The
+    // bridge was never asked and the relay was never opened, so mains is
+    // still on -- nothing else to do.
     Timer.clear(graceTimer);
     graceTimer = null;
     print("[cuems] SW0 back ON within grace -- shutdown cancelled");
+    return;
   }
+
+  // SW0 -> ON with no pending shutdown: this is a power-ON request. The
+  // cluster was previously shut down and the bridge opened the relay (mains
+  // cut), so re-close the relay to restore mains. With BIOS power-on-after-
+  // AC-loss = ON the controller + nodes boot, the bridge autoloads the
+  // project and the projectors wake. (If mains is already on, harmless
+  // no-op.) Requires SW0 DETACHED so the input doesn't fight this Set.
+  print("[cuems] SW0 ON -- closing relay to restore mains");
+  Shelly.call("Switch.Set", {id: 0, on: true});
 });
 
 print("[cuems] cuems-shutdown.js armed -- flip SW0 OFF to initiate orderly shutdown (" + CANCEL_GRACE_S + "s grace)");
