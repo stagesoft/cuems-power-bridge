@@ -297,7 +297,7 @@ class Bridge:
         local_cmd_str = self.cfg.controller_poweroff_cmd.strip() or self.cfg.poweroff_cmd
         cmd = local_cmd_str.split()
         # --no-block lets us flip /status to done before systemd reaps us.
-        if "--no-block" not in cmd:
+        if "systemctl" in local_cmd_str and "--no-block" not in cmd:
             cmd = cmd + ["--no-block"]
         if self.cfg.dry_run:
             log.info("[dry_run] would exec local poweroff: %s",
