@@ -1,6 +1,11 @@
 #!/usr/bin/make -f
 
 export DH_VIRTUALENV_INSTALL_ROOT=/usr/lib
+# Isolate the build venv's pip from the builder's user site-packages
+# (~/.local). Otherwise a dep already present there (e.g. typing_extensions
+# left by a `pip install --user`) is seen as "satisfied" and NOT bundled into
+# the package, producing a .deb that crashes at runtime with ModuleNotFound.
+export PYTHONNOUSERSITE=1
 
 %:
 	dh $@ --with python-virtualenv
@@ -42,6 +47,9 @@ override_dh_fixperms:
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/pycparser*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/pynng*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/sniffio*
+	# websockets is shipped by cuems-utils into the shared venv; bundling it
+	# here collides with cuems-utils' file (dpkg refuses). Rely on theirs.
+	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/websockets*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/timecode*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/wrapt*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/xmlschema*
