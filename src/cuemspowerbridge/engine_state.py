@@ -80,6 +80,15 @@ class EngineClient:
         intentionally NOT supported — broadcast carries unix_name."""
         return self.load not in ("", UNKNOWN)
 
+    def fully_ready(self) -> bool:
+        """True iff a project is loaded AND armed=='yes'.
+
+        The auto-load gate requires THIS, not merely project_loaded(): a
+        loaded-but-unarmed project (nodes excluded at load time, or not yet
+        armed within the engine's 120 s watchdog) must be treated as
+        not-yet-ready so the bridge keeps driving / confirming."""
+        return self.project_loaded() and self.armed == "yes"
+
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run_loop(), name="engine-ws")
 

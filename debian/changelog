@@ -61,6 +61,46 @@ cuems-power-bridge (0.3.0-1) UNRELEASED; urgency=medium
     systemctl commands. The default sudo /sbin/poweroff is the systemctl
     poweroff applet, which rejects --no-block (unrecognized option) and so
     silently no-op'd the controller shutdown (nodes were unaffected).
+  * auto-load: harden boot-time auto-load against slow/late nodes (WoL
+    recovery, fsck). Previously the bridge fired project_ready ~2 s after
+    the controller booted -- before the nodes' engines had joined the NNG
+    bus -- so the engine froze its required-node set with those nodes
+    EXCLUDED and GO stayed blocked until a manual engine restart. The fix
+    is entirely bridge-side (no engine/editor/frontend change):
+    - Wait for the expected node-engines to connect to the controller's
+      NNG hub before loading. node-engines are NNG Bus0 clients of the hub,
+      so the bridge reads its own ESTABLISHED socket table via `ss` (no
+      root) and gates on "expected node IPs connected to <nng_hub_port>" --
+      exactly the engine's own liveness criterion, so exclusion is
+      prevented at the source. New module `cluster_bus.py`.
+    - Require armed==yes (not merely project_loaded) before declaring
+      success, with soft retries; a never-arming load self-heals on a 30 s
+      cadence instead of giving up.
+    - New `engine_state.fully_ready()` (loaded AND armed); new
+      `network_map.slave_ips()` (trusts <ip> for bus-matching, degrades
+      gracefully on missing/stale <ip> via a count-based fallback).
+    - nng_hub_port is read from <nng_hub_port> in settings.xml (single
+      source of truth), never a separate conf knob.
+    - New config: auto_load_wait_nodes, auto_load_node_ids (CSV subset),
+      auto_load_node_timeout_s, auto_load_node_settle_s,
+      auto_load_armed_timeout_s, auto_load_max_attempts.
+    - /status gains `autoload_pending` (role_ids still off the bus,
+      distinct from shutdown's `nodes_pending`) and `auto_load_armed`.
+    - Re-drive guard: if an operator loads a DIFFERENT project while the
+      bridge is waiting/retrying, it backs off rather than clobbering it.
+    - stop() cancels the (now long-running) auto-load task before engine/
+      editor teardown so /shutdown stays prompt even mid bus-wait.
+    - Projector power-on is debounced so an auto-load re-drive's transient
+      load empty->non-empty flip doesn't re-power displays repeatedly.
+    - Hardening (code review): record the driven project's unix_name as soon
+      as it loads (not only on arm) so the re-drive guard catches an operator
+      loading a different project DURING the pre-arm soft-retry window; reset
+      the projector debounce on engine disconnect so a reconnect within the
+      window still re-asserts power; make the editor-error watcher
+      exception-safe and wrap each auto-load attempt so no stray exception can
+      kill the loop (it self-heals on the next tick); mtime-cache the
+      network_map.xml parse so retries don't re-read it (an operator edit
+      mid-recovery still bumps mtime -> reparse).
 
  -- Ion Reguera <ion@stagelab.coop>  Wed, 03 Jun 2026 16:16:48 +0200
 

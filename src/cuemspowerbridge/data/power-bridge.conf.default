@@ -45,6 +45,33 @@ editor_ws_url = ws://localhost:9092       # JSON: project_ready for auto-load
 auto_load_project =                       # UUID; empty = no auto-load
 auto_load_persistent = false              # false = once per bridge process; true = re-arm on every empty-load
 
+# --- Auto-load node-readiness gate ---
+# Boot-time auto-load is fragile against slow/late nodes. The engine freezes
+# its required-node set from a single ~1.5 s NNG liveness probe at load time
+# and starts a 120 s arm watchdog; a node not yet on the bus at that instant
+# is silently EXCLUDED (GO then blocked, needing a manual engine restart).
+#
+# READINESS MODEL: node-engines are NNG Bus0 CLIENTS of the controller's hub
+# (port from <nng_hub_port> in settings.xml). The bridge runs on the
+# controller and reads its own socket table (`ss`, no root) to see which node
+# IPs are connected to that hub — exactly what the engine's probe counts as
+# "alive". So we WAIT until the expected node-engines are on the hub before
+# firing project_ready, then require armed==yes (not merely loaded) and retry.
+#
+# <ip> LIMITATION: matching is by network_map.xml <ip> (operator-maintained,
+# nodeconf disabled). A missing <ip> skips that node; a STALE <ip> never
+# matches — covered by a count-based fallback (when waiting for ALL slaves:
+# enough distinct bus peers ⇒ proceed) and, failing that, a graceful
+# degraded-proceed after the timeout. It never hangs.
+auto_load_wait_nodes = true               # false ≈ legacy path (but success still needs armed==yes)
+auto_load_node_ids =                      # CSV of role_ids to wait for; empty = ALL adopted slaves
+auto_load_node_timeout_s = 420            # max wait for node-engines on the bus (covers fsck) → then DEGRADED-proceed
+auto_load_node_settle_s = 10              # margin after bus-connect before loading
+auto_load_armed_timeout_s = 150           # wait for armed==yes (> engine's 120 s arm watchdog; min 30)
+auto_load_max_attempts = 5                # soft attempts, then 30 s self-heal cadence (never disables)
+# Note: nng_hub_port is NOT configured here — it is read from
+# <nng_hub_port> in /etc/cuems/settings.xml (single source of truth).
+
 # --- Operational ---
 dry_run = false                           # true = log side-effects without executing
 unresolvable_nodes_policy = skip          # nodes with no role_id/alias/hostname: log ERROR + skip

@@ -31,6 +31,7 @@ class Node:
     alias: str | None
     hostname: str | None
     node_type: str | None  # "NodeType.master" | "NodeType.slave" | None
+    ip: str | None = None  # operator-maintained cluster IP (see slave_ips)
 
 
 def _text(parent: ET.Element, *names: str) -> str | None:
@@ -91,6 +92,7 @@ def parse(path: str) -> list[Node]:
                 alias=alias,
                 hostname=hostname,
                 node_type=_text(el, "node_type"),
+                ip=_text(el, "ip"),
             )
         )
     return nodes
@@ -112,3 +114,36 @@ def slave_avahi_names(path: str) -> tuple[list[str], list[Node]]:
         else:
             unresolvable.append(n)
     return resolved, unresolvable
+
+
+def slave_ips(path: str) -> list[tuple[str, str]]:
+    """Return (ip, label) for each adopted NodeType.slave that carries an <ip>.
+
+    `label` is `role_id` (→ alias → hostname → uuid) for logging/filtering.
+
+    Unlike the rest of this module — which DELIBERATELY ignores `<ip>` as a
+    stale link-local and resolves via avahi instead (see module docstring) —
+    `slave_ips()` deliberately TRUSTS `<ip>`, because the NNG-hub readiness
+    gate matches node-engine TCP peers by IP, not hostname. A missing or
+    stale `<ip>` degrades gracefully and never hangs:
+
+    - missing `<ip>`  → the slave is skipped here (logged WARNING); the gate
+      simply can't wait for it by IP.
+    - stale `<ip>`    → it never matches a real bus peer; the caller's
+      count-based fallback (when waiting for ALL slaves) or its
+      degraded-proceed after the node timeout (subset case) covers it.
+
+    nodeconf is disabled cluster-wide, so `<ip>` is operator-maintained —
+    the same trust the bridge already places in the rest of network_map.xml.
+    """
+    out: list[tuple[str, str]] = []
+    for n in parse(path):
+        if n.node_type != "NodeType.slave":
+            continue
+        if not n.ip:
+            log.warning("network_map: slave uuid=%s has no <ip>; skipping "
+                        "bus-readiness match for it", n.uuid)
+            continue
+        label = n.role_id or n.alias or n.hostname or n.uuid
+        out.append((n.ip, label))
+    return out

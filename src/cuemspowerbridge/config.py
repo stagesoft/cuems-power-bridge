@@ -41,6 +41,25 @@ class Config:
     auto_load_project: str = ""
     auto_load_persistent: bool = False
 
+    # Auto-load node-readiness gate (feat/autoload-wait-for-nodes). Before
+    # firing project_ready we wait until the expected node-engines are
+    # connected to the controller's NNG hub (so the engine's own liveness
+    # probe counts them as alive and never excludes them), then require
+    # armed=="yes" (not merely loaded) and retry. See power-bridge.conf.default.
+    auto_load_wait_nodes: bool = True
+    auto_load_node_ids: str = ""        # CSV of role_ids to wait for; empty = ALL adopted slaves
+    auto_load_node_timeout_s: int = 420  # max wait for node-engines on the bus; covers fsck, then DEGRADED
+    auto_load_node_settle_s: int = 10    # small margin after bus-connect before loading
+    auto_load_armed_timeout_s: int = 150  # wait for armed==yes (> engine's 120 s arm watchdog)
+    auto_load_max_attempts: int = 5      # soft attempts, then slow-cadence self-heal retries
+
+    # NNG hub port the node-engines connect to. NOT a conf knob: resolved
+    # from <nng_hub_port> in settings.xml at load() time (single source of
+    # truth — a separate knob could drift from the engine's actual port).
+    # The field default is only the fallback when settings.xml is unreadable.
+    nng_hub_port: int = 9093
+    settings_xml_path: str = "/etc/cuems/settings.xml"
+
     # Operational
     dry_run: bool = False
     unresolvable_nodes_policy: str = "skip"
@@ -76,6 +95,10 @@ class Config:
 
     extras: dict = field(default_factory=dict)
 
+    def node_ids_list(self) -> list[str]:
+        """Parse `auto_load_node_ids` CSV → stripped, blank-free role_ids."""
+        return [s.strip() for s in self.auto_load_node_ids.split(",") if s.strip()]
+
     def validate(self) -> None:
         """Hard-validate at startup; raises ValueError on bad config."""
         if not (45 <= self.shelly_safety_timer_s <= 300):
@@ -103,6 +126,19 @@ class Config:
             raise ValueError(
                 f"projector_command_timeout_s={self.projector_command_timeout_s} "
                 "must be > 0 (0 makes every projector command time out instantly)"
+            )
+        for name in ("auto_load_node_timeout_s", "auto_load_node_settle_s",
+                     "auto_load_armed_timeout_s"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name}={getattr(self, name)} must be >= 0")
+        if self.auto_load_armed_timeout_s < 30:
+            raise ValueError(
+                f"auto_load_armed_timeout_s={self.auto_load_armed_timeout_s} too low; "
+                "must be >= 30 (recommend >= 150 — the engine's arm watchdog is 120 s)"
+            )
+        if self.auto_load_max_attempts < 1:
+            raise ValueError(
+                f"auto_load_max_attempts={self.auto_load_max_attempts} must be >= 1"
             )
 
 
@@ -136,6 +172,31 @@ def _parse(text: str, cfg: Config) -> None:
             cfg.extras[key] = value
 
 
+def _read_nng_hub_port(path: str) -> int | None:
+    """Read <nng_hub_port> from settings.xml. Returns None if the file is
+    missing/unparseable or the element is absent/non-numeric (caller keeps
+    the fallback default). Namespace-agnostic (matches by local-name)."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        tree = ET.parse(path)
+    except (FileNotFoundError, OSError, ET.ParseError) as e:
+        log.info("config: could not read nng_hub_port from %s (%s); "
+                 "using fallback", path, type(e).__name__)
+        return None
+    for el in tree.getroot().iter():
+        if el.tag.split("}", 1)[-1] != "nng_hub_port":
+            continue
+        if el.text and el.text.strip():
+            try:
+                return int(el.text.strip())
+            except ValueError:
+                log.warning("config: non-numeric <nng_hub_port>=%r in %s; "
+                            "using fallback", el.text, path)
+                return None
+    return None
+
+
 def load(path: str | None = None) -> Config:
     """Load config from path (default /etc/cuems/power-bridge.conf).
 
@@ -159,6 +220,14 @@ def load(path: str | None = None) -> Config:
         log.info("config: loaded %s", sys_path)
     else:
         log.info("config: %s not found, using defaults", sys_path)
+
+    # 3) resolve nng_hub_port from settings.xml (authoritative single source
+    # of truth — overrides any value parsed above; falls back to the field
+    # default when settings.xml is unreadable).
+    port = _read_nng_hub_port(cfg.settings_xml_path)
+    if port is not None:
+        cfg.nng_hub_port = port
+    log.info("config: nng_hub_port=%d", cfg.nng_hub_port)
 
     cfg.validate()
     return cfg

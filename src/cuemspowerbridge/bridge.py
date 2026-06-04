@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shlex
 import time
 from datetime import datetime, timezone
@@ -18,16 +19,22 @@ from typing import Any
 
 from aiohttp import web
 
-from . import network_map
+from . import cluster_bus, network_map
 from .config import Config
 from .displays.manager import DisplayManager
 from .editor_client import EditorClient
-from .engine_state import EngineClient
+from .engine_state import UNKNOWN, EngineClient
 from .node_executor import SshTarget, poweroff_all
 from .reachability import wait_until_all_down
 from .shelly import ShellyClient, ShellyError
 
 log = logging.getLogger(__name__)
+
+# Suppress duplicate projector power-on spawns within this window. A re-drive
+# of auto-load can briefly flip the engine's `load` empty→non-empty again,
+# re-firing the load edge-detector; this debounces those so a loaded project
+# powers projectors on at most once per window (see _on_engine_status).
+_PROJECTOR_ON_DEBOUNCE_S = 30.0
 
 # /status state machine
 STATES = (
@@ -73,10 +80,21 @@ class Bridge:
         # stop() and to suppress duplicate spawns on engine reconnects.
         self._projector_on_task: asyncio.Task | None = None
         self._project_loaded_seen = False
+        self._last_projector_on_monotonic = 0.0
         self._shutdown_lock = asyncio.Lock()
+        # Auto-load state.
+        self._auto_load_task: asyncio.Task | None = None
         self._auto_load_done = False
-        self._auto_load_failures = 0
+        self._auto_load_failures = 0       # HARD (editor error) strikes → disable at 3
+        self._auto_load_soft_attempts = 0  # SOFT (loaded-but-not-armed) retries; never disable
         self._auto_load_disabled = False
+        self._auto_load_unix_name: str | None = None  # our own driven project's load name
+        self._auto_load_ids_warned = False
+        self._autoload_pending: list[str] = []  # role_ids still off the bus (degraded)
+        # network_map.xml parse cache, keyed on (path, mtime): retries reuse it,
+        # but an operator editing a stale <ip> mid-recovery bumps mtime → reparse.
+        self._slave_ips_cache: list[tuple[str, str]] | None = None
+        self._slave_ips_cache_key: tuple[str, float | None] | None = None
         self._state = "idle"
         self._state_since = _now()
         self._nodes_pending: list[str] = []
@@ -109,6 +127,10 @@ class Bridge:
             "since": self._state_since,
             "engine_state": eng,
             "nodes_pending": list(self._nodes_pending),
+            # Auto-load bus-wait: role_ids whose node-engine is not yet on the
+            # NNG hub. Distinct from shutdown's `nodes_pending` (avahi names).
+            "autoload_pending": list(self._autoload_pending),
+            "auto_load_armed": self.engine.armed,
             "shelly_timer_armed_s": self.cfg.shelly_safety_timer_s,
             "last_error": self._last_error,
             "displays": self.displays.snapshot(),
@@ -314,106 +336,248 @@ class Bridge:
     # ------------------- auto-load -------------------
 
     async def _auto_load_loop(self) -> None:
-        """Watch engine cache; trigger auto-load when conditions met."""
+        """Watch the engine cache and drive auto-load to a fully-ready state.
+
+        Self-serialized: the single ``await _try_auto_load()`` runs to
+        completion before the next tick, so no in-flight flag is needed. The
+        loop is cancellable (``stop()`` cancels the task) — it only ever
+        blocks inside ``asyncio.sleep``/awaited probes.
+        """
         if not self.cfg.auto_load_project:
             return
+        delay = 2.0
         while True:
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(delay)
+            delay = 2.0
             if self._auto_load_disabled:
                 return
+            # Never act while the engine WS is down / armed is unknown.
             if not self.engine.is_known():
                 continue
-            if self.engine.project_loaded():
+            # Already loaded AND armed → nothing to do.
+            if self.engine.fully_ready():
                 continue
+            # Re-drive guard: don't clobber an operator's DIFFERENT load. We
+            # only ever record `_auto_load_unix_name` on our own fully-ready
+            # success, so a non-empty `load` that differs from it means an
+            # operator loaded something else.
+            if self._operator_clobber():
+                log.warning(
+                    "auto-load: engine.load=%r differs from our driven "
+                    "project %r — operator loaded a different project; "
+                    "backing off (disabled for session)",
+                    self.engine.load, self._auto_load_unix_name,
+                )
+                self._auto_load_disabled = True
+                return
+            # Once-only mode: we already succeeded and operator likely
+            # unloaded intentionally — don't re-drive.
             if self._auto_load_done and not self.cfg.auto_load_persistent:
-                # Once-only mode: operator may have intentionally unloaded.
                 continue
-            await self._try_auto_load()
+            try:
+                outcome = await self._try_auto_load()
+            except asyncio.CancelledError:
+                raise  # stop() cancelled us — propagate cleanly
+            except Exception:
+                # An attempt must never kill the loop: log and retry next tick
+                # (the loop is the self-heal mechanism). Treat as a soft miss.
+                log.exception("auto-load: attempt raised; retrying next tick")
+                outcome = "not_armed"
+            if outcome == "not_armed":
+                self._auto_load_soft_attempts += 1
+                if self._auto_load_soft_attempts >= self.cfg.auto_load_max_attempts:
+                    log.error(
+                        "auto-load: %d soft attempts without armed==yes; "
+                        "slowing to 30 s self-heal cadence (will keep "
+                        "retrying, never disables)",
+                        self._auto_load_soft_attempts,
+                    )
+                    delay = 30.0
 
-    async def _try_auto_load(self) -> None:
+    def _operator_clobber(self) -> bool:
+        """True iff a DIFFERENT project than the one we drove is loaded.
+
+        Caller must have already passed ``is_known()``. Returns False during
+        our own soft-retry window (``_auto_load_unix_name`` is None until a
+        fully-ready success), so a loaded-but-not-yet-armed *own* project is
+        never mistaken for an operator clobber."""
+        load = self.engine.load
+        return bool(
+            self._auto_load_unix_name
+            and load not in ("", UNKNOWN)
+            and load != self._auto_load_unix_name
+        )
+
+    def _slave_ips_cached(self, path: str) -> list[tuple[str, str]]:
+        """network_map.slave_ips(path) with an mtime-keyed cache.
+
+        Runs in a worker thread (run_in_executor); only the serialized
+        auto-load loop ever touches the cache attrs, so no locking is needed.
+        A changed mtime (operator edited network_map.xml mid-recovery) forces a
+        reparse; otherwise repeated retries reuse the prior result."""
+        try:
+            mtime: float | None = os.stat(path).st_mtime
+        except OSError:
+            mtime = None
+        key = (path, mtime)
+        if self._slave_ips_cache is not None and self._slave_ips_cache_key == key:
+            return self._slave_ips_cache
+        result = network_map.slave_ips(path)
+        self._slave_ips_cache = result
+        self._slave_ips_cache_key = key
+        return result
+
+    async def _expected_node_ips(self) -> list[tuple[str, str]]:
+        """Resolve (ip, role_id) of the node-engines we must wait for.
+
+        Default = every adopted slave with an ``<ip>``. If
+        ``auto_load_node_ids`` is set, restrict to that subset (warn once on
+        any id not present in the map — validate() can't see network_map)."""
+        loop = asyncio.get_event_loop()
+        slaves = await loop.run_in_executor(
+            None, self._slave_ips_cached, self.cfg.network_map_path
+        )
+        wanted = self.cfg.node_ids_list()
+        if not wanted:
+            return slaves
+        by_id = {label: ip for ip, label in slaves}
+        result: list[tuple[str, str]] = []
+        for rid in wanted:
+            if rid in by_id:
+                result.append((by_id[rid], rid))
+            elif not self._auto_load_ids_warned:
+                log.warning("auto-load: auto_load_node_ids id %r not found in "
+                            "network_map (no <ip> to wait for)", rid)
+        self._auto_load_ids_warned = True
+        return result
+
+    async def _try_auto_load(self) -> str:
+        """One auto-load attempt. Returns a classification:
+        "armed" | "editor_error" | "not_armed" | "skipped".
+        """
         uuid = self.cfg.auto_load_project
+
+        # (1) Resolve expected node IPs and (2) wait for them on the NNG hub.
+        expected = await self._expected_node_ips()
+        id_by_ip = {ip: label for ip, label in expected}
+        expected_ips = set(id_by_ip)
+        if self.cfg.auto_load_wait_nodes and expected_ips:
+            log.info("auto-load: waiting for %d node-engine(s) on the NNG hub "
+                     "(:%d): %s", len(expected_ips), self.cfg.nng_hub_port,
+                     ", ".join(sorted(id_by_ip.values())))
+            self._autoload_pending = sorted(id_by_ip.values())
+            res = await cluster_bus.wait_until_engines_on_bus(
+                expected_ips, self.cfg.nng_hub_port,
+                interval_s=3.0, max_wait_s=self.cfg.auto_load_node_timeout_s,
+                wait_all=not self.cfg.node_ids_list(),
+                id_by_ip=id_by_ip,
+            )
+            if res.timed_out:
+                pending = [id_by_ip.get(ip, ip) for ip in res.stuck]
+                self._autoload_pending = pending
+                log.warning(
+                    "auto-load: DEGRADED after %.0fs — node-engine(s) never "
+                    "joined the bus: %s; proceeding anyway",
+                    res.elapsed_s, ", ".join(pending),
+                )
+            else:
+                self._autoload_pending = []
+            # (3) Small settle margin after bus-connect before loading.
+            await asyncio.sleep(self.cfg.auto_load_node_settle_s)
+        else:
+            self._autoload_pending = []
+
+        # (4) Fire project_ready.
         if not self.editor.connected:
             log.debug("auto-load: editor not connected, skipping this round")
-            return
+            return "skipped"
         log.info("auto-load: sending project_ready %s", uuid)
         sent = await self.editor.send_action("project_ready", uuid)
         if not sent:
             log.warning("auto-load: send failed")
-            return
+            return "skipped"
 
-        # Race-aware wait: engine status flips first, editor ack follows.
-        # We watch both; whichever comes first decides outcome.
-        async def wait_engine() -> bool:
-            for _ in range(120):  # 60s
-                await asyncio.sleep(0.5)
-                if self.engine.project_loaded():
-                    return True
-            return False
+        # (5) Confirm armed==yes (or fail-fast on an editor error).
+        outcome = await self._await_armed_or_error(uuid)
 
-        async def wait_editor_error() -> bool:
-            resp = await self.editor.wait_for_response("project_ready", timeout=60)
-            if resp is None:
-                return False
-            return resp.get("type") == "error"
-
-        engine_task = asyncio.create_task(wait_engine())
-        editor_err_task = asyncio.create_task(wait_editor_error())
-        try:
-            done, pending = await asyncio.wait(
-                {engine_task, editor_err_task},
-                return_when=asyncio.FIRST_COMPLETED,
-                timeout=65,
-            )
-        finally:
-            for t in (engine_task, editor_err_task):
-                if not t.done():
-                    t.cancel()
-
-        # If editor error fired first → fail-fast.
-        if editor_err_task in done and editor_err_task.result() is True:
+        # (6) Classify.
+        if outcome == "armed":
+            self._auto_load_done = True
+            self._auto_load_unix_name = self.engine.load
+            self._auto_load_failures = 0
+            self._auto_load_soft_attempts = 0
+            self._autoload_pending = []
+            log.info("auto-load: project loaded AND armed (uuid=%s, load=%r)",
+                     uuid, self.engine.load)
+            return "armed"
+        if outcome == "editor_error":
             self._auto_load_failures += 1
-            log.error("auto-load: editor returned error for uuid=%s (failure %d/3)",
-                      uuid, self._auto_load_failures)
+            log.error("auto-load: editor returned error for uuid=%s "
+                      "(hard %d/3)", uuid, self._auto_load_failures)
             if self._auto_load_failures >= 3:
-                log.error("auto-load: 3 consecutive failures, disabling for session")
+                log.error("auto-load: 3 editor errors, disabling for session")
                 self._auto_load_disabled = True
-            return
+            return "editor_error"
+        # not_armed (soft — loop retries; never disables)
+        log.warning("auto-load: project loaded but armed!=yes within %ds "
+                    "(soft retry)", self.cfg.auto_load_armed_timeout_s)
+        return "not_armed"
 
-        if engine_task in done and engine_task.result() is True:
-            self._auto_load_done = True
-            self._auto_load_failures = 0
-            log.info("auto-load: project loaded (engine status confirms)")
-            return
+    async def _await_armed_or_error(self, uuid: str) -> str:
+        """Wait for ``fully_ready()`` (armed==yes) or an editor error.
 
-        # Editor responded with success BEFORE engine status arrived (the
-        # broadcast and editor ack race; editor wins ~30% of the time on
-        # localhost). Editor success means the project_ready handler ran
-        # to completion — accept that as confirmation, with a final check
-        # against the engine status cache.
-        editor_resp_ok = (
-            editor_err_task in done
-            and editor_err_task.result() is False
-            and self.editor.connected
-        )
-        if editor_resp_ok and self.engine.project_loaded():
-            self._auto_load_done = True
-            self._auto_load_failures = 0
-            log.info("auto-load: project loaded (editor ack + engine cache confirm)")
-            return
-        if self.engine.project_loaded():
-            # Race the other way: engine status arrived but our wait_engine
-            # task got cancelled before its sleep cycle saw it. Still OK.
-            self._auto_load_done = True
-            self._auto_load_failures = 0
-            log.info("auto-load: project loaded (engine cache confirms post-wait)")
-            return
+        Polls the engine cache every 0.5 s up to ``auto_load_armed_timeout_s``.
+        A single ``wait_for_response("project_ready")`` watches for a fail-fast
+        editor error in parallel; an editor *success* (or timeout) is ignored
+        — the engine `armed` cache is the authoritative readiness signal.
+        Returns "armed" | "editor_error" | "not_armed".
+        """
+        timeout = self.cfg.auto_load_armed_timeout_s
+        err_task = asyncio.create_task(self._wait_editor_error(uuid, timeout))
 
-        self._auto_load_failures += 1
-        log.warning("auto-load: no confirmation within 60s (failure %d/3)",
-                    self._auto_load_failures)
-        if self._auto_load_failures >= 3:
-            log.error("auto-load: 3 consecutive failures, disabling for session")
-            self._auto_load_disabled = True
+        def editor_errored() -> bool:
+            # Exception-safe: a crashed/cancelled err_task must NOT re-raise
+            # out of the poll (that would abort the whole attempt). Treat any
+            # non-clean completion as "no editor error observed".
+            if not err_task.done() or err_task.cancelled():
+                return False
+            if err_task.exception() is not None:
+                log.warning("auto-load: editor-error watcher raised: %s",
+                            err_task.exception())
+                return False
+            return bool(err_task.result())
+
+        try:
+            loops = max(1, int(timeout / 0.5))
+            for _ in range(loops):
+                await asyncio.sleep(0.5)
+                # Record the unix_name our drive produced as soon as a project
+                # loads — even before it arms — so the re-drive guard can spot
+                # an operator loading a DIFFERENT project during the soft-retry
+                # window (before we ever reach armed==yes).
+                if self._auto_load_unix_name is None and self.engine.project_loaded():
+                    self._auto_load_unix_name = self.engine.load
+                if self.engine.fully_ready():
+                    return "armed"
+                if editor_errored():
+                    return "editor_error"
+            if self.engine.fully_ready():
+                return "armed"
+            if editor_errored():
+                return "editor_error"
+            return "not_armed"
+        finally:
+            if not err_task.done():
+                err_task.cancel()
+                try:
+                    await err_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _wait_editor_error(self, uuid: str, timeout: float) -> bool:
+        """True iff the editor returns an error frame for project_ready."""
+        resp = await self.editor.wait_for_response("project_ready", timeout=timeout)
+        return bool(resp and resp.get("type") == "error")
 
     # ------------------- projector power-on -------------------
 
@@ -431,7 +595,17 @@ class Bridge:
         loaded = self.engine.project_loaded()
         if loaded and not self._project_loaded_seen:
             self._project_loaded_seen = True
-            self._spawn_projector_power_on()
+            # Debounce: an auto-load re-drive can flip load empty→non-empty
+            # repeatedly; only actually (re)spawn power-on if we haven't done
+            # so within the debounce window. The spawn helper also guards
+            # against a concurrent in-flight task.
+            now = time.monotonic()
+            if now - self._last_projector_on_monotonic >= _PROJECTOR_ON_DEBOUNCE_S:
+                self._last_projector_on_monotonic = now
+                self._spawn_projector_power_on()
+            else:
+                log.debug("projector power-on debounced (load re-flipped "
+                          "within %.0fs)", _PROJECTOR_ON_DEBOUNCE_S)
         elif not loaded:
             # Back to no project — re-arm so the next load powers on again.
             self._project_loaded_seen = False
@@ -468,8 +642,15 @@ class Bridge:
     def _on_engine_disconnect(self) -> None:
         """Re-arm the load edge-detector when the engine connection drops, so
         a reconnect's status dump is treated as a fresh load and re-asserts
-        projector power (otherwise the stale 'seen' flag would suppress it)."""
+        projector power (otherwise the stale 'seen' flag would suppress it).
+
+        Also clear the power-on debounce window: the debounce only exists to
+        coalesce an auto-load re-drive's load flip-flops on a LIVE connection.
+        A genuine disconnect/reconnect must always re-assert power, even within
+        the window — otherwise a brief blip < _PROJECTOR_ON_DEBOUNCE_S after a
+        power-on would leave displays off."""
         self._project_loaded_seen = False
+        self._last_projector_on_monotonic = 0.0
 
     # ------------------- lifecycle -------------------
 
@@ -479,7 +660,9 @@ class Bridge:
         if self.cfg.projector_power_on_on_load and self.displays.configured:
             self.engine.on_status(self._on_engine_status)
             self.engine.on_disconnect(self._on_engine_disconnect)
-        asyncio.create_task(self._auto_load_loop(), name="auto-load")
+        self._auto_load_task = asyncio.create_task(
+            self._auto_load_loop(), name="auto-load"
+        )
         app = web.Application()
         app.router.add_get("/status", self.handle_status)
         app.router.add_post("/go", self.handle_go)
@@ -493,6 +676,17 @@ class Bridge:
         return runner
 
     async def stop(self) -> None:
+        # Cancel the auto-load loop FIRST so an in-flight long bus-wait (up to
+        # auto_load_node_timeout_s) can't keep the event loop alive and delay
+        # shutdown / risk a systemd SIGKILL. The loop only awaits sleeps/probes
+        # and holds no lock, so cancellation is prompt and safe.
+        if self._auto_load_task is not None:
+            self._auto_load_task.cancel()
+            try:
+                await self._auto_load_task
+            except asyncio.CancelledError:
+                pass
+            self._auto_load_task = None
         await self._cancel_projector_on_task()
         await self.engine.stop()
         await self.editor.stop()
