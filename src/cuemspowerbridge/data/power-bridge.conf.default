@@ -54,9 +54,11 @@ ssh_user = cuems-admin
 ssh_key = /etc/cuems/power-bridge.key
 poweroff_cmd = sudo /sbin/poweroff
 # Optional split for the local controller. Empty → use poweroff_cmd above.
-# Set to "sudo /usr/bin/systemctl reboot" when controller WoL-from-S5 is
-# unreliable (Realtek r8169 known issue) so you can safely test the cluster
-# shutdown — nodes really power off, controller reboots and comes back.
+# Set to "sudo /usr/bin/systemctl reboot" for safe unattended testing: the
+# controller cycles back on its own (nodes really power off) without relying
+# on Wake-on-LAN or a physical power-on. WoL-from-S5 IS verified working on
+# this cluster's Realtek r8169 NICs (re-armed each boot by cuems-arm-wol),
+# though r8169 WoL can be flaky across hardware generally.
 controller_poweroff_cmd =
 
 # --- HTTP bind ---

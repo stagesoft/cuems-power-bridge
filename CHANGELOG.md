@@ -26,8 +26,9 @@ version in `pyproject.toml` has not yet been bumped.
 - **`controller_poweroff_cmd` config field** (0.2.1-1) — optional override for the local
   controller's poweroff or reboot command. When empty (default) the bridge falls back to
   `poweroff_cmd`, preserving identical behaviour for all existing deployments. The split
-  supports two real-world use cases: (1) controller WoL-from-S5 is unreliable on Realtek
-  r8169 NICs, so operators can set `poweroff_cmd = sudo /sbin/poweroff` (nodes truly power
+  supports two real-world use cases: (1) you want the controller to self-recover during
+  testing without relying on Wake-on-LAN (WoL-from-S5 can be flaky across r8169 hardware),
+  so operators can set `poweroff_cmd = sudo /sbin/poweroff` (nodes truly power
   off) and `controller_poweroff_cmd = sudo /usr/bin/systemctl reboot` (controller cycles
   back automatically — both code paths run for real); (2) maintenance flows where nodes
   should fully power down but the controller must recover autonomously.
