@@ -101,10 +101,12 @@ cuems-power-bridge (0.3.0-2) UNRELEASED; urgency=medium
       kill the loop (it self-heals on the next tick); mtime-cache the
       network_map.xml parse so retries don't re-read it (an operator edit
       mid-recovery still bumps mtime -> reparse).
-  * Packaging: strip `websockets` (shipped by cuems-utils into the shared
-    /usr/lib/cuems venv) from the bundled deps so `dpkg -i` no longer aborts
-    with a file-overwrite conflict against cuems-utils; rely on cuems-utils'
-    copy (it is a hard dependency). Also `export PYTHONNOUSERSITE=1` in
+  * Packaging: strip deps that other cuems packages already ship into the
+    shared /usr/lib/cuems venv, so `dpkg -i` no longer aborts with a
+    file-overwrite conflict: `websockets` (cuems-utils) and `pythonosc`
+    (cuems-engine). power-bridge runs only on controllers, where both
+    provider packages are always installed, so it relies on their copies.
+    Also `export PYTHONNOUSERSITE=1` in
     debian/rules so the build venv's pip ignores the builder's ~/.local -- a
     dep already present there (e.g. typing_extensions from a stray
     `pip install --user`) was treated as satisfied and omitted from the .deb,
