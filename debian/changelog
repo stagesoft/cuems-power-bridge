@@ -50,6 +50,18 @@ cuems-power-bridge (0.3.0-1) UNRELEASED; urgency=medium
     password hang), locking the bridge key with
     `restrict,command="sudo /sbin/poweroff"`. Idempotent (replaces any prior
     entry for the key). Pairs with cuems-common 99-cuems-admin-poweroff.
+  * shelly-mjs: send the auth header via HTTP.Request, not HTTP.POST. Shelly's
+    HTTP.POST silently drops a custom headers map (it only honors
+    content_type), so X-Auth-Token never reached the bridge and every
+    /shutdown got 401 bad_token. HTTP.Request transmits arbitrary headers.
+  * shelly-mjs: on SW0 -> ON with no shutdown pending, re-close the relay
+    (Switch.Set on:true) to restore mains -- the "relay on -> machines boot"
+    production path (needs SW0 detached + BIOS power-on-after-AC-loss = ON).
+  * bridge: only append --no-block to the local controller poweroff for
+    systemctl commands. The default sudo /sbin/poweroff is the systemctl
+    poweroff applet, which rejects --no-block (unrecognized option) and so
+    silently no-op'd the controller shutdown (nodes were unaffected).
+
  -- Ion Reguera <ion@stagelab.coop>  Wed, 03 Jun 2026 16:16:48 +0200
 
 cuems-power-bridge (0.2.6-1) UNRELEASED; urgency=medium
