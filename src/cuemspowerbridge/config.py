@@ -70,6 +70,9 @@ class Config:
     # and parsed by DisplayManager.from_config().
     projector_power_off_on_shutdown: bool = True
     projector_power_on_on_load: bool = True
+    # Power displays ON at bridge startup, independent of any project load, so
+    # they warm up in parallel with the node-wait / auto-load. Default off.
+    projector_power_on_on_start: bool = False
     projector_command_timeout_s: float = 5.0
 
     extras: dict = field(default_factory=dict)
