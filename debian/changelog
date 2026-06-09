@@ -1,3 +1,21 @@
+cuems-power-bridge (0.3.0-3) UNRELEASED; urgency=medium
+
+  * displays: decouple projector power-on from project load. New
+    `projector_power_on_on_start` global powers displays ON at bridge startup
+    (independent of `projector_power_on_on_load`) so they warm up in parallel
+    with node-wait / auto-load, plus an on-demand `POST /poweron`. Startup and
+    on-load paths share the fire-and-forget task and dedup against each other.
+  * autoload: new `auto_play` global (default false). After a successful
+    auto-load (project loaded AND armed), optionally send
+    `/engine/command/go` automatically so an unattended/kiosk controller
+    plays from a cold boot. Fires only after the bridge's own auto-load
+    (never a manual/editor load), waits bounded for armed, skips if the
+    project is already running, and is cancelled on stop() and the shutdown
+    path so a pending GO can't fire mid-power-off. Unit tests added
+    (tests/test_bridge_autoplay.py).
+
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 09 Jun 2026 21:57:35 +0200
+
 cuems-power-bridge (0.3.0-2) UNRELEASED; urgency=medium
 
   * shelly-mjs: add a cancellable grace window. After SW0 -> OFF the script
