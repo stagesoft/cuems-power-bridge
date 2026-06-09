@@ -496,6 +496,13 @@ either read-only (config, resolved node list) or protected by `asyncio.Lock`
   restart does **not** retrigger it. `auto_load_persistent = true`: re-arms on every
   observed empty-load, for unattended installations that must recover from any failure.
   Three consecutive failures permanently disable auto-load for the bridge session.
+* **Auto-play** — `auto_play = true` makes the bridge send `/engine/command/go`
+  automatically once an **auto-loaded** project arms (it waits up to ~30 s for the
+  engine to report `armed`, then GO). It fires **only** after the bridge's own
+  auto-load — a manual/editor load never auto-starts — and never if the project is
+  already running, so it can never auto-stop or double-trigger a show. For
+  unattended/kiosk installs that should play end-to-end from a cold boot. No-op
+  unless `auto_load_project` is set.
 
 * **Avahi hostnames** — the bridge resolves SSH targets exclusively from Avahi `.local`
   names derived from `network_map.xml` fields (`role_id` → `alias` → `hostname`). The
@@ -822,6 +829,7 @@ Loading: package-data defaults first, then system file overrides on top.
 | `editor_ws_url` | `ws://localhost:9092` | Editor JSON WebSocket (project_ready for auto-load) |
 | `auto_load_project` | `""` | Project UUID to auto-load on boot; empty disables auto-load |
 | `auto_load_persistent` | `false` | `false` = once per bridge process (engine restart does **not** retrigger); `true` = re-arm on every observed empty-load |
+| `auto_play` | `false` | `true` = send GO automatically once an auto-loaded project arms (waits ~30 s for `armed`). Only after the bridge's own auto-load, never a manual load; skipped if already running. No-op unless `auto_load_project` is set |
 
 #### Operational
 
@@ -973,6 +981,7 @@ poetry run pytest --asyncio-mode=auto -v
    shelly_url = http://10.16.8.10        # Shelly IP (not .local)
    shared_token = mysecret               # recommended
    auto_load_project = <uuid>            # optional: project to load on boot
+   auto_play = false                     # optional: GO automatically after auto-load
    shelly_safety_timer_s = 60            # 45..300 s
    ```
 3. Start the service and verify:

@@ -35,6 +35,12 @@ STATES = (
     "done", "failed",
 )
 
+# Auto-play: after a successful auto-load, wait for the engine to arm (load->arm
+# is asynchronous) before sending GO. Polled at _AUTO_PLAY_POLL_S for at most
+# _AUTO_PLAY_ARM_POLLS iterations. Module-level so tests can shrink them.
+_AUTO_PLAY_POLL_S = 0.5
+_AUTO_PLAY_ARM_POLLS = 60  # 60 * 0.5s = 30s
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -72,6 +78,9 @@ class Bridge:
         # reports a project loaded; we keep the task handle to cancel it on
         # stop() and to suppress duplicate spawns on engine reconnects.
         self._projector_on_task: asyncio.Task | None = None
+        # Auto-play GO task, spawned after a successful auto-load (fire-and-
+        # forget); handle kept to dedup and to cancel on stop()/shutdown.
+        self._auto_play_task: asyncio.Task | None = None
         self._project_loaded_seen = False
         self._shutdown_lock = asyncio.Lock()
         self._auto_load_done = False
@@ -234,6 +243,9 @@ class Bridge:
         # run the power-off CONCURRENTLY with the reachability poll below, so
         # a slow/unreachable projector never adds latency to the
         # safety-critical sequence. power_off_all() isolates per-device errors.
+        # Also cancel any pending auto-play so a GO can't fire mid-shutdown
+        # (this path does NOT go through stop(); it cancels tasks directly).
+        await self._cancel_auto_play_task()
         await self._cancel_projector_on_task()
         projector_off_task: asyncio.Task | None = None
         if self.cfg.projector_power_off_on_shutdown and self.displays.configured:
@@ -380,9 +392,7 @@ class Bridge:
             return
 
         if engine_task in done and engine_task.result() is True:
-            self._auto_load_done = True
-            self._auto_load_failures = 0
-            log.info("auto-load: project loaded (engine status confirms)")
+            self._mark_auto_load_success("engine status confirms")
             return
 
         # Editor responded with success BEFORE engine status arrived (the
@@ -396,16 +406,12 @@ class Bridge:
             and self.editor.connected
         )
         if editor_resp_ok and self.engine.project_loaded():
-            self._auto_load_done = True
-            self._auto_load_failures = 0
-            log.info("auto-load: project loaded (editor ack + engine cache confirm)")
+            self._mark_auto_load_success("editor ack + engine cache confirm")
             return
         if self.engine.project_loaded():
             # Race the other way: engine status arrived but our wait_engine
             # task got cancelled before its sleep cycle saw it. Still OK.
-            self._auto_load_done = True
-            self._auto_load_failures = 0
-            log.info("auto-load: project loaded (engine cache confirms post-wait)")
+            self._mark_auto_load_success("engine cache confirms post-wait")
             return
 
         self._auto_load_failures += 1
@@ -414,6 +420,14 @@ class Bridge:
         if self._auto_load_failures >= 3:
             log.error("auto-load: 3 consecutive failures, disabling for session")
             self._auto_load_disabled = True
+
+    def _mark_auto_load_success(self, reason: str) -> None:
+        """Common tail for the auto-load success paths: record the win and,
+        if configured, kick off auto-play (GO once the project arms)."""
+        self._auto_load_done = True
+        self._auto_load_failures = 0
+        log.info("auto-load: project loaded (%s)", reason)
+        self._maybe_auto_play()
 
     # ------------------- projector power-on -------------------
 
@@ -465,6 +479,67 @@ class Bridge:
         except Exception:
             log.exception("projector power-on task errored during cancel")
 
+    # ------------------- auto-play -------------------
+
+    def _maybe_auto_play(self) -> None:
+        """After a successful auto-load, optionally auto-start playback.
+
+        Gated by cfg.auto_play. Fire-and-forget; the task handle dedups so a
+        re-driven auto-load (auto_load_persistent) can't stack GO waits.
+        """
+        if not self.cfg.auto_play:
+            return
+        if self._auto_play_task is not None and not self._auto_play_task.done():
+            log.debug("auto-play already in flight; skipping duplicate")
+            return
+        self._auto_play_task = asyncio.create_task(
+            self._auto_play_after_load(), name="auto-play"
+        )
+
+    async def _auto_play_after_load(self) -> None:
+        """Wait (bounded) for the engine to arm, then send GO once.
+
+        Never sends GO if the project is already running (so a re-driven
+        auto-load while playing is a no-op). A failed send (engine dropped
+        mid-arm) is accepted as final for this load cycle — no retry.
+        """
+        for _ in range(_AUTO_PLAY_ARM_POLLS):
+            if not self.engine.is_known():
+                await asyncio.sleep(_AUTO_PLAY_POLL_S)
+                continue
+            if self.engine.project_running():
+                log.info("auto-play: project already running; not sending GO")
+                return
+            if self.engine.armed == "yes":
+                sent = await self.engine.send_osc("/engine/command/go")
+                if sent:
+                    log.info("auto-play: GO sent after auto-load")
+                else:
+                    log.warning("auto-play: GO send failed (engine not connected)")
+                return
+            await asyncio.sleep(_AUTO_PLAY_POLL_S)
+        log.warning("auto-play: engine never armed within %.0fs; GO not sent",
+                    _AUTO_PLAY_ARM_POLLS * _AUTO_PLAY_POLL_S)
+
+    async def _cancel_auto_play_task(self) -> None:
+        """Cancel any in-flight auto-play wait and let it unwind.
+
+        Used on stop() and at the start of shutdown so a pending GO can't be
+        sent as the power-off sequence runs. Suppresses CancelledError; logs
+        any real error.
+        """
+        t = self._auto_play_task
+        self._auto_play_task = None
+        if t is None or t.done():
+            return
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("auto-play task errored during cancel")
+
     def _on_engine_disconnect(self) -> None:
         """Re-arm the load edge-detector when the engine connection drops, so
         a reconnect's status dump is treated as a fresh load and re-asserts
@@ -493,6 +568,7 @@ class Bridge:
         return runner
 
     async def stop(self) -> None:
+        await self._cancel_auto_play_task()
         await self._cancel_projector_on_task()
         await self.engine.stop()
         await self.editor.stop()
