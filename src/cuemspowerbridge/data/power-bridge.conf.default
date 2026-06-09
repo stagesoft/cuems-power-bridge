@@ -44,6 +44,7 @@ engine_ws_url = ws://localhost:9190       # binary OSC: status + GO/STOP
 editor_ws_url = ws://localhost:9092       # JSON: project_ready for auto-load
 auto_load_project =                       # UUID; empty = no auto-load
 auto_load_persistent = false              # false = once per bridge process; true = re-arm on every empty-load
+auto_play = false                         # true = send GO automatically once an auto-loaded project arms (needs auto_load_project)
 
 # --- Auto-load node-readiness gate ---
 # Boot-time auto-load is fragile against slow/late nodes. The engine freezes

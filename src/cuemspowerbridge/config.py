@@ -40,6 +40,10 @@ class Config:
     editor_ws_url: str = "ws://localhost:9092"
     auto_load_project: str = ""
     auto_load_persistent: bool = False
+    # Send GO automatically once an auto-loaded project arms. Only ever fires
+    # after the bridge's OWN auto-load (never a manual/editor load); never stops
+    # a running project. No-op unless auto_load_project is set.
+    auto_play: bool = False
 
     # Auto-load node-readiness gate (feat/autoload-wait-for-nodes). Before
     # firing project_ready we wait until the expected node-engines are
