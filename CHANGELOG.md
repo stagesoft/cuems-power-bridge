@@ -23,6 +23,17 @@ version in `pyproject.toml` has not yet been bumped.
 
 ### Added
 
+- **Projector power-on decoupled from project load** — new `projector_power_on_on_start`
+  config field (default `false`) powers displays ON at bridge startup, gated independently
+  of `projector_power_on_on_load`, so projectors warm up in parallel with the
+  node-wait/auto-load instead of only after a project loads. Adds a **`POST /poweron`**
+  HTTP route (symmetric with `/shutdown`'s projectors-off) to power displays on on demand
+  (Shelly/Companion); fire-and-forget, reusing the existing `_projector_on_task` dedup
+  guard so concurrent calls don't race. Fixes the asymmetry where disabling auto-load
+  (commenting `auto_load_project`) also disabled boot-time projector power-on while
+  `/shutdown` still powered everything off. Existing on-load behaviour is unchanged
+  (becomes an idempotent no-op once startup power-on has fired).
+
 - **`controller_poweroff_cmd` config field** (0.2.1-1) — optional override for the local
   controller's poweroff or reboot command. When empty (default) the bridge falls back to
   `poweroff_cmd`, preserving identical behaviour for all existing deployments. The split

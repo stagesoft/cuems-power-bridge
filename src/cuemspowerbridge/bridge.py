@@ -185,6 +185,22 @@ class Bridge:
         log.info("STOP forwarded to engine")
         return self._ok()
 
+    async def handle_poweron(self, request: web.Request) -> web.Response:
+        """Power displays ON on demand — symmetric with /shutdown's
+        projectors-off. Fire-and-forget: schedules the shared power-on task
+        and returns immediately (200 = accepted), so a slow/unreachable
+        projector can't hold the HTTP response open (Shelly/Companion expect a
+        quick reply). The `_projector_on_task` guard in _spawn_projector_power_on
+        dedups concurrent calls, so no separate lock is needed."""
+        if not self._check_token(request):
+            return self._err("bad_token", 401)
+        if not self._rate.allow("poweron"):
+            return self._err("rate_limited", 429)
+        if not self.displays.configured:
+            return self._err("no_displays", 503)
+        self._spawn_projector_power_on("/poweron request")
+        return self._ok()
+
     async def handle_shutdown(self, request: web.Request) -> web.Response:
         if not self._check_token(request):
             return self._err("bad_token", 401)
@@ -610,14 +626,28 @@ class Bridge:
             # Back to no project — re-arm so the next load powers on again.
             self._project_loaded_seen = False
 
-    def _spawn_projector_power_on(self) -> None:
+    def _spawn_projector_power_on(self, reason: str = "project loaded") -> None:
         if self._projector_on_task is not None and not self._projector_on_task.done():
             log.debug("projector power-on already in progress; skipping duplicate")
             return
-        log.info("project loaded → powering on displays")
+        log.info("%s → powering on displays", reason)
         self._projector_on_task = asyncio.create_task(
             self.displays.power_on_all(), name="projector-power-on"
         )
+
+    def _maybe_power_on_at_start(self) -> None:
+        """Power displays ON at bridge startup, independent of project load.
+
+        Gated only by `projector_power_on_on_start` (NOT by
+        `projector_power_on_on_load`) so the two paths are independent: with
+        on_load=False, on_start=True the fleet still powers on at boot. Spawns
+        the shared fire-and-forget task, so it never blocks startup and the
+        `_projector_on_task` guard dedups against a near-simultaneous on-load
+        power-on. Does not touch `_project_loaded_seen` (the on-load
+        edge-detector stays independent; a later real load is a harmless,
+        idempotent POWR 1 if the projector is already on)."""
+        if self.cfg.projector_power_on_on_start and self.displays.configured:
+            self._spawn_projector_power_on("startup")
 
     async def _cancel_projector_on_task(self) -> None:
         """Cancel any in-flight power-on task and wait for it to unwind.
@@ -660,6 +690,9 @@ class Bridge:
         if self.cfg.projector_power_on_on_load and self.displays.configured:
             self.engine.on_status(self._on_engine_status)
             self.engine.on_disconnect(self._on_engine_disconnect)
+        # Independent of the on-load hook above: power displays on at startup
+        # so they warm up in parallel with the node-wait / auto-load below.
+        self._maybe_power_on_at_start()
         self._auto_load_task = asyncio.create_task(
             self._auto_load_loop(), name="auto-load"
         )
@@ -667,6 +700,7 @@ class Bridge:
         app.router.add_get("/status", self.handle_status)
         app.router.add_post("/go", self.handle_go)
         app.router.add_post("/stop", self.handle_stop)
+        app.router.add_post("/poweron", self.handle_poweron)
         app.router.add_post("/shutdown", self.handle_shutdown)
         runner = web.AppRunner(app)
         await runner.setup()

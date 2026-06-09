@@ -104,6 +104,11 @@ network_map_path = /etc/cuems/network_map.xml
 # ON" (network standby) plus PJLink enabled on the projector.
 projector_power_on_on_load = true        # power displays ON when a project loads
 projector_power_off_on_shutdown = true   # power displays OFF during /shutdown
+# Power displays ON at bridge startup too (independent of project load), so they
+# warm up in parallel with the node-wait/auto-load. Also reachable on demand via
+# POST /poweron. Fires on every service start (incl. restarts) — leave off if you
+# need a manual /shutdown-off to persist across a bridge restart. Default off.
+projector_power_on_on_start = false      # power displays ON at startup + enable POST /poweron-driven warmup
 projector_command_timeout_s = 5          # per-command network timeout (> 0)
 
 # One numbered block per device (1, 2, 3, ...). Uncomment + edit:
