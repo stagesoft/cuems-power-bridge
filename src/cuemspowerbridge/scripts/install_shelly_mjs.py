@@ -34,18 +34,21 @@ from pathlib import Path
 DEFAULT_GRACE_S = 5
 
 
-def _patched_code(template: str, bridge: str, token: str,
-                  cancel_grace: int = DEFAULT_GRACE_S) -> str:
-    """Patch the BRIDGE + TOKEN + CANCEL_GRACE_S literals in the template.
+def _patched_code(template: str, bridge: str, token: str, toggle_id: int,
+                  force: bool, cancel_grace: int = DEFAULT_GRACE_S) -> str:
+    """Patch the BRIDGE + TOKEN + TOGGLE_ID + FORCE + CANCEL_GRACE_S literals
+    in the template.
 
     Each substitution is guarded by a PRE-replace check that the expected
     literal is present, so a template drift (renamed/reformatted literal)
     raises rather than silently shipping an unpatched value — uniformly for
-    all three, including TOKEN and the no-op CANCEL_GRACE_S=default case.
+    all of them, including TOKEN and the no-op default cases.
     """
     subs = [
         ('let BRIDGE = "http://controller.local:8478";', f'let BRIDGE = "{bridge}";'),
         ('let TOKEN  = "REPLACE-ME";', f'let TOKEN  = "{token}";'),
+        ('let TOGGLE_ID = 200;', f'let TOGGLE_ID = {int(toggle_id)};'),
+        ('let FORCE  = true;', f'let FORCE  = {"true" if force else "false"};'),
         (f"let CANCEL_GRACE_S = {DEFAULT_GRACE_S};",
          f"let CANCEL_GRACE_S = {int(cancel_grace)};"),
     ]
@@ -88,10 +91,88 @@ async def _rpc(session: aiohttp.ClientSession, base: str, method: str, params: d
         return await r.json(content_type=None) if r.content_type != "application/json" else None or __import__("json").loads(text)
 
 
-async def install(shelly_url: str, code: str, name: str = "cuems-shutdown") -> int:
-    """Upload + start the script. Returns the script id."""
+# Web-UI shutdown control. A standalone virtual component is NOT clickable in
+# this firmware's UI (the Components page is management-only; Home shows only
+# physical switches/inputs). The control becomes a clickable switch on the Home
+# page only when a *boolean* virtual component ("toggle" view) is placed inside
+# a *group*. `name` is the idempotency key. Verified on a Pro1 fw 1.7.5:
+# flipping the toggle emits a boolean status delta {value:true} that the mJS
+# catches; the script springs it back to false so it acts as a momentary push.
+TOGGLE_NAME = "SHUTDOWN CLUSTER"
+TOGGLE_META = {"ui": {"view": "toggle"}}
+GROUP_NAME = "SHUTDOWN"
+
+
+async def _ensure_toggle(session: "aiohttp.ClientSession", base: str) -> int:
+    """Ensure the web-UI shutdown control exists: a boolean toggle named
+    TOGGLE_NAME placed in a group named GROUP_NAME so it renders as a clickable
+    switch on the Home page. Idempotent (reuses existing toggle + group, never
+    duplicates). Returns the boolean's numeric id. Requires fw with virtual
+    components (>= 1.4)."""
+    async def _components():
+        async with session.post(
+            f"{base}/rpc/Shelly.GetComponents", json={"dynamic_only": True}
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"GetComponents failed: {r.status} {await r.text()}")
+            return (await r.json()).get("components", [])
+
+    async def _add(vtype: str, cfg: dict) -> int:
+        async with session.post(
+            f"{base}/rpc/Virtual.Add", json={"type": vtype, "config": cfg}
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"Virtual.Add {vtype} failed: {r.status} {await r.text()}")
+            return (await r.json())["id"]
+
+    def _find(comps, prefix, vname):
+        return next((c["config"]["id"] for c in comps
+                     if c.get("key", "").startswith(prefix)
+                     and c.get("config", {}).get("name") == vname), None)
+
+    comps = await _components()
+    bid = _find(comps, "boolean:", TOGGLE_NAME)
+    if bid is None:
+        bid = await _add("boolean", {"name": TOGGLE_NAME, "meta": TOGGLE_META})
+        print(f"  created toggle 'boolean:{bid}' (name={TOGGLE_NAME})")
+    else:
+        print(f"  reusing toggle 'boolean:{bid}' (name={TOGGLE_NAME})")
+
+    gid = _find(comps, "group:", GROUP_NAME)
+    if gid is None:
+        gid = await _add("group", {"name": GROUP_NAME})
+        print(f"  created group 'group:{gid}' (name={GROUP_NAME})")
+    else:
+        print(f"  reusing group 'group:{gid}' (name={GROUP_NAME})")
+
+    # Associate the toggle with the group so it shows as a Home-page switch
+    # (idempotent; Group.SetConfig doesn't echo membership but it does stick).
+    async with session.post(
+        f"{base}/rpc/Group.SetConfig",
+        json={"id": gid, "config": {"components": [f"boolean:{bid}"]}},
+    ) as r:
+        if r.status != 200:
+            raise RuntimeError(f"Group.SetConfig failed: {r.status} {await r.text()}")
+    print(f"  group:{gid} <- boolean:{bid} (web-UI toggle on Home)")
+    return bid
+
+
+async def install(shelly_url: str, template: str, bridge: str, token: str,
+                  force: bool = True, cancel_grace: int = DEFAULT_GRACE_S,
+                  name: str = "cuems-shutdown") -> int:
+    """Ensure the web-UI toggle + group, patch the template, upload + start the
+    script. Returns the script id."""
     import aiohttp  # deferred: keeps _patched_code/_load_template importable without aiohttp
     async with aiohttp.ClientSession() as s:
+        # 0. Ensure the web-UI toggle (boolean in a Home group) exists, learn
+        #    its id, then patch BRIDGE/TOKEN/TOGGLE_ID/FORCE/CANCEL_GRACE_S.
+        toggle_id = await _ensure_toggle(s, shelly_url)
+        code = _patched_code(template, bridge, token, toggle_id, force, cancel_grace)
+        print(f"  patched code: {len(code)} bytes, BRIDGE={bridge}, "
+              f"TOKEN={'(set)' if token else '(empty)'}, TOGGLE_ID={toggle_id}, "
+              f"FORCE={'true (always off)' if force else 'false (safe)'}, "
+              f"cancel_grace={cancel_grace}s")
+
         # 1. Remove any existing script with the same name
         async with s.post(f"{shelly_url}/rpc/Script.List", json={}) as r:
             lst = await r.json()
@@ -161,6 +242,10 @@ def main() -> int:
                         help="Grace window after SW0->OFF before /shutdown is sent; "
                              "flip SW0 back ON within it to cancel "
                              f"(default: {DEFAULT_GRACE_S})")
+    parser.add_argument("--safe", action="store_true",
+                        help="Both triggers respect a running project (bridge "
+                             "409s while playing). Default: the Shelly always "
+                             "shuts the cluster down, even mid-show.")
     args = parser.parse_args()
 
     if args.cancel_grace < 0:
@@ -168,13 +253,12 @@ def main() -> int:
         return 1
 
     template = _load_template(args.template)
-    code = _patched_code(template, args.bridge, args.token, args.cancel_grace)
-    print(f"Patched code: {len(code)} bytes, BRIDGE={args.bridge}, "
-          f"TOKEN={'(set)' if args.token else '(empty)'}, "
-          f"cancel_grace={args.cancel_grace}s")
-    print(f"Installing on {args.shelly} ...")
+    force = not args.safe
+    print(f"Installing on {args.shelly} ... "
+          f"({'FORCE: always shuts down' if force else 'SAFE: refuses while a project runs'})")
     try:
-        asyncio.run(install(args.shelly, code, args.name))
+        asyncio.run(install(args.shelly, template, args.bridge, args.token,
+                            force=force, cancel_grace=args.cancel_grace, name=args.name))
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

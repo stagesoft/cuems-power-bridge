@@ -1,14 +1,26 @@
 // cuems-shutdown.js -- Shelly Pro 1 (Gen 2) mJS script.
 //
-// Installs into the Shelly's Scripts tab via the device web UI. Edit
-// BRIDGE and TOKEN below for your deployment, then click "Save" and
-// "Start". The script then sleeps until the wired flip-switch on SW
-// input 0 transitions to OFF, waits a short cancellable grace window,
-// and then asks the controller's power bridge to do an orderly cluster
-// shutdown. The bridge arms a hardware safety timer on this Shelly which
-// opens the relay (cuts mains) after the configured number of seconds --
-// even if the bridge itself disappears mid-shutdown, the Shelly will
-// still cut power.
+// Installs into the Shelly's Scripts tab via the device web UI (or the
+// cuems-power-bridge-install-mjs helper). Edit BRIDGE and TOKEN below for
+// your deployment, then click "Save" and "Start". The script then sleeps
+// until one of two triggers asks the controller's power bridge for an
+// orderly cluster shutdown:
+//
+//   1. The wired flip-switch on SW input 0 transitions to OFF (after a
+//      short cancellable grace window -- flip back ON to cancel).
+//   2. The "SHUTDOWN CLUSTER" web-UI toggle is flipped ON -- a boolean
+//      virtual component surfaced as a clickable switch on the Home page
+//      via the "SHUTDOWN" group; the script springs it back to OFF so it
+//      acts as a momentary trigger.
+//
+// FORCE controls whether those triggers shut the cluster down even while a
+// project is running. Default true => the Shelly ALWAYS turns the cluster
+// off (a true hardware kill). Set false (installer flag --safe) to make the
+// bridge refuse with 409 while a project is running.
+//
+// The bridge arms a hardware safety timer on this Shelly which opens the
+// relay (cuts mains) after the configured number of seconds -- even if the
+// bridge itself disappears mid-shutdown, the Shelly will still cut power.
 //
 // SW0 must be configured as a DETACHED input (it triggers this script;
 // it does NOT directly switch the relay) -- otherwise flipping OFF would
@@ -28,6 +40,8 @@
 // Always use the alias of the interface that's on the Shelly's L2.
 let BRIDGE = "http://controller.local:8478";
 let TOKEN  = "REPLACE-ME";                 // matches power-bridge.conf shared_token
+let TOGGLE_ID = 200;                       // web-UI toggle (boolean) id; patched by the installer
+let FORCE  = true;                         // patched by the installer (--safe sets false)
 let CANCEL_GRACE_S = 5;                    // after SW0 -> OFF, wait this many
                                            // seconds before asking the bridge to
                                            // shut down; flip SW0 back ON within
@@ -36,8 +50,13 @@ let CANCEL_GRACE_S = 5;                    // after SW0 -> OFF, wait this many
 let inflight = false;                      // guard while a /shutdown POST is in flight
 let graceTimer = null;                     // pending grace countdown (null = none)
 
-function sendShutdown() {
-  graceTimer = null;
+// Shared trigger path. force=true => POST /shutdown?force=1 (bypasses the
+// bridge's refuse-if-running guard, so the cluster goes down even mid-show);
+// false => plain /shutdown (the bridge 409s while a project is running).
+function sendShutdown(force) {
+  // Consume any pending grace countdown (e.g. the web-UI toggle firing while
+  // an SW0 grace window is still ticking) so it can't fire a second time.
+  if (graceTimer !== null) { Timer.clear(graceTimer); graceTimer = null; }
   if (inflight) { print("[cuems] shutdown already in flight -- skipping"); return; }
   inflight = true;
   // Fail-safe: if the HTTP callback never fires (Shelly internal hang),
@@ -50,7 +69,7 @@ function sendShutdown() {
   // HTTP.Request is the only HTTP method that transmits arbitrary headers.
   Shelly.call("HTTP.Request", {
     method: "POST",
-    url: BRIDGE + "/shutdown",
+    url: BRIDGE + "/shutdown" + (force ? "?force=1" : ""),
     body: "{}",
     headers: {"X-Auth-Token": TOKEN, "Content-Type": "application/json"}
   }, function (r, err_code, err_msg) {
@@ -88,7 +107,7 @@ Shelly.addStatusHandler(function (ev) {
     }
     if (graceTimer !== null) Timer.clear(graceTimer);
     print("[cuems] SW0 OFF -- shutting down in " + CANCEL_GRACE_S + "s (flip ON to cancel)");
-    graceTimer = Timer.set(CANCEL_GRACE_S * 1000, false, sendShutdown);
+    graceTimer = Timer.set(CANCEL_GRACE_S * 1000, false, function () { sendShutdown(FORCE); });
     return;
   }
 
@@ -113,4 +132,15 @@ Shelly.addStatusHandler(function (ev) {
   Shelly.call("Switch.Set", {id: 0, on: true});
 });
 
-print("[cuems] cuems-shutdown.js armed -- flip SW0 OFF to initiate orderly shutdown (" + CANCEL_GRACE_S + "s grace)");
+// Trigger 2: web-UI toggle (boolean virtual component, shown on Home via the
+// "SHUTDOWN" group) flipped ON. Spring it straight back to OFF so it acts as
+// a momentary push, then fire. No grace window (a UI flip is deliberate).
+Shelly.addStatusHandler(function (ev) {
+  if (ev.component !== "boolean:" + TOGGLE_ID) return;
+  if (ev.delta === undefined || ev.delta.value !== true) return;
+  print("[cuems] web UI toggle -- initiating shutdown");
+  Shelly.call("Boolean.Set", {id: TOGGLE_ID, value: false});  // spring back to OFF
+  sendShutdown(FORCE);
+});
+
+print("[cuems] cuems-shutdown.js armed (" + (FORCE ? "force" : "safe") + ") -- flip SW0 OFF (" + CANCEL_GRACE_S + "s grace) or flip the web-UI toggle to initiate orderly shutdown");
