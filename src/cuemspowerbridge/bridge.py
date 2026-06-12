@@ -143,6 +143,11 @@ class Bridge:
             "shelly_timer_armed_s": self.cfg.shelly_safety_timer_s,
             "last_error": self._last_error,
             "displays": self.displays.snapshot(),
+            # Brightness presets — NEW top-level keys (NOT inside `displays`, whose
+            # shape existing clients parse). Lets Companion pre-validate a level.
+            "brightness_levels": self.displays.brightness_levels,
+            "brightness_devices": self.displays.brightness_count,
+            "last_brightness_level": self.displays.last_brightness_level,
         }
 
     # ------------------- HTTP handlers -------------------
@@ -209,6 +214,50 @@ class Bridge:
             return self._err("no_displays", 503)
         self._spawn_projector_power_on("/poweron request")
         return self._ok()
+
+    async def handle_brightness(self, request: web.Request) -> web.Response:
+        """Set a fixed brightness preset across the brightness fleet (Epson
+        ESC/VP21). Companion-triggerable. `level` comes from the query string
+        (`?level=full`) or a JSON body (`{"level":"full"}`).
+
+        Codes: 401 bad_token, 429 rate_limited, 503 no_brightness_devices,
+        400 missing_level / unknown_level, 200 all applied, 207 partial,
+        502 all_failed (e.g. every projector in standby returns ERR)."""
+        if not self._check_token(request):
+            return self._err("bad_token", 401)
+        if not self._rate.allow("brightness"):
+            return self._err("rate_limited", 429)
+        if not self.displays.brightness_configured:
+            return self._err("no_brightness_devices", 503)
+        level = request.query.get("level")
+        if not level:
+            try:
+                body = await request.json()
+                level = (body or {}).get("level")
+            except Exception:
+                level = None
+        if not level:
+            return self._err("missing_level", 400)
+        if level not in self.displays.brightness_levels:
+            return web.json_response(
+                {"ok": False, "reason": "unknown_level",
+                 "levels": self.displays.brightness_levels},
+                status=400,
+            )
+        result = await self.displays.set_brightness(level)
+        applied, failed = result["applied"], result["failed"]
+        body = {"ok": failed == 0, "level": level,
+                "applied": applied, "failed": failed, "results": result["results"]}
+        if failed == 0:
+            log.info("brightness '%s' applied to %d device(s)", level, applied)
+            return web.json_response(body, status=200)
+        if applied == 0:
+            body["reason"] = "all_failed"
+            log.error("brightness '%s' failed on all %d device(s)", level, failed)
+            return web.json_response(body, status=502)
+        body["reason"] = "partial"
+        log.warning("brightness '%s' partial: %d ok, %d failed", level, applied, failed)
+        return web.json_response(body, status=207)
 
     async def handle_shutdown(self, request: web.Request) -> web.Response:
         if not self._check_token(request):
@@ -779,6 +828,7 @@ class Bridge:
         app.router.add_post("/stop", self.handle_stop)
         app.router.add_post("/poweron", self.handle_poweron)
         app.router.add_post("/shutdown", self.handle_shutdown)
+        app.router.add_post("/brightness", self.handle_brightness)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, self.cfg.listen_host, self.cfg.listen_port)

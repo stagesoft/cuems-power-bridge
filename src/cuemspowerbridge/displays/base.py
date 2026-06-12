@@ -53,6 +53,13 @@ class DeviceDef:
     driver: str = "pjlink"
     port: int = 0  # 0 → driver-specific default
     password: str = ""
+    # Optional second channel: Epson ESC/VP21-over-ESC/VP.net for brightness
+    # (TCP 3629), independent of the PJLink power channel above. `brightness`
+    # opts a device into the brightness fleet; the escvp_* fields are its
+    # ESC/VP.net port/password (often a different secret than PJLink).
+    brightness: bool = False
+    escvp_port: int = 0  # 0 → driver-specific default (3629)
+    escvp_password: str = ""
 
     def label(self) -> str:
         """Human label for logs/status — name if set, else host."""

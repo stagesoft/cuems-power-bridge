@@ -1,3 +1,24 @@
+cuems-power-bridge (0.3.0-4) UNRELEASED; urgency=medium
+
+  * displays: add projector brightness presets over Epson ESC/VP21
+    (ESC/VP.net, TCP 3629) -- a second control channel beside PJLink power,
+    which has no brightness command. New `POST /brightness?level=<name>`
+    (query string or JSON body) fans a configured ESC/VP21 command across an
+    opt-in fleet; 200 all-applied / 207 partial / 502 all-failed /
+    400 unknown_level / 503 no_brightness_devices. Generic + config-driven:
+    `brightness.<level>.command` maps a level name to an ESC/VP21 verb, and
+    `projector.N.brightness` (+ optional `escvp_password` / `escvp_port`) opts
+    a device in -- no install-specific values in code, a no-op where
+    unconfigured. Adds `displays/escvp.py` (HELLO + plaintext-password auth,
+    trailing-header drain, CR/LF command sanitisation, dry_run, bounded
+    timeout), `DeviceDef` brightness fields, a SEPARATE `_brightness_drivers`
+    fleet in DisplayManager with per-device error isolation + startup
+    validation, and three `/status` keys (`brightness_levels`,
+    `brightness_devices`, `last_brightness_level`). Tests:
+    tests/test_escvp.py (12) + tests/test_brightness.py (17).
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 12 Jun 2026 13:01:34 +0200
+
 cuems-power-bridge (0.3.0-3) UNRELEASED; urgency=medium
 
   * displays: decouple projector power-on from project load. New
