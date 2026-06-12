@@ -50,6 +50,11 @@ override_dh_fixperms:
 	# websockets is shipped by cuems-utils into the shared venv; bundling it
 	# here collides with cuems-utils' file (dpkg refuses). Rely on theirs.
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/websockets*
+	# pythonosc is shipped by cuems-engine into the shared venv; same collision.
+	# power-bridge runs only on controllers, where cuems-engine is always
+	# present, so rely on its copy (matches the pre-existing working install).
+	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/pythonosc*
+	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/python_osc*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/timecode*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/wrapt*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/xmlschema*

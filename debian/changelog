@@ -1,3 +1,14 @@
+cuems-power-bridge (0.3.0-2+brightness2) UNRELEASED; urgency=medium
+
+  * packaging: also strip `pythonosc` / `python_osc` from the bundled venv —
+    cuems-engine ships it into the shared /usr/lib/cuems venv, so bundling it
+    here makes `dpkg -i` abort with a file-overwrite conflict. Backport of the
+    mainline c8dad4f fix onto this 0.3.0-2 base (the 0.3.0-2 release predates
+    it). power-bridge only runs on controllers, where cuems-engine is always
+    present, so its copy is relied upon.
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 12 Jun 2026 13:35:00 +0200
+
 cuems-power-bridge (0.3.0-2+brightness1) UNRELEASED; urgency=medium
 
   * BACKPORT branch for the badajoz controller (which runs 0.3.0-2). Adds ONLY
