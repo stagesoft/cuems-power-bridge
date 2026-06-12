@@ -114,3 +114,25 @@ projector_command_timeout_s = 5          # per-command network timeout (> 0)
 #   projector.1.password =               # optional; do NOT use '#' (parser strips it)
 #   projector.2.host     = 10.16.10.22
 #   projector.2.name     = Stage Right
+
+# --- Brightness presets (optional, Epson ESC/VP21 over ESC/VP.net :3629) ---
+# A no-op unless configured. Lets a single HTTP call (Companion-friendly) set a
+# fixed brightness on the opted-in projectors, leaving every other unit alone:
+#     POST /brightness?level=<name>     (X-Auth-Token header if shared_token set)
+#   -> 200 all applied | 207 partial | 502 all failed | 400 unknown_level
+#      | 503 no_brightness_devices
+# Levels are install-defined: brightness.<name>.command = <ESC/VP21 verb+value>.
+# The verb is whatever knob you want (BRIGHT = OSD "Brightness/Brillo", LUMINANCE
+# = light-source mode, etc.). NOTE: brightness only applies while the projector
+# is POWERED ON — in standby every ESC/VP21 set returns ERR (surfaced as 502).
+#
+#   brightness.standard.command = BRIGHT 0     # e.g. the dialed-down/eco value
+#   brightness.full.command     = BRIGHT 50    # e.g. the normal/bright value
+#
+# Then opt specific devices into the brightness fleet (only these are touched):
+#   projector.1.brightness      = true
+#   projector.1.escvp_password  =              # ESC/VP.net password (may differ
+#                                              # from the PJLink password above)
+#   projector.1.escvp_port      = 3629         # optional; ESC/VP.net default 3629
+# Requires "Command Communication" (ESC/VP.net) enabled on each projector's
+# network menu — distinct from the PJLink toggle.

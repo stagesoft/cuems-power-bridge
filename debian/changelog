@@ -1,3 +1,19 @@
+cuems-power-bridge (0.3.0-2+brightness1) UNRELEASED; urgency=medium
+
+  * BACKPORT branch for the badajoz controller (which runs 0.3.0-2). Adds ONLY
+    the projector brightness feature on top of the exact 0.3.0-2 source — it does
+    NOT pull the later 0.3.0-3/0.3.0-4 changes (projector power-on decouple,
+    /poweron, auto-play). Use this .deb to replace the live hot-patch on badajoz
+    without a surprise feature upgrade. Version sorts above 0.3.0-2 and below
+    0.3.0-3, so a future mainline upgrade supersedes it cleanly.
+  * displays: projector brightness presets over Epson ESC/VP21 (ESC/VP.net, TCP
+    3629): POST /brightness?level=<name>, generic config-driven levels
+    (`brightness.<level>.command`) + per-device `projector.N.brightness`, new
+    displays/escvp.py driver, separate brightness fleet with per-device isolation,
+    three /status keys. See the 0.3.0-4 mainline entry for full detail.
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 12 Jun 2026 13:01:34 +0200
+
 cuems-power-bridge (0.3.0-2) UNRELEASED; urgency=medium
 
   * shelly-mjs: add a cancellable grace window. After SW0 -> OFF the script
