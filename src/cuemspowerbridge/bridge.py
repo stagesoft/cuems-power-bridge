@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shlex
 import time
 from datetime import datetime, timezone
@@ -47,6 +48,15 @@ STATES = (
 # _AUTO_PLAY_ARM_POLLS iterations. Module-level so tests can shrink them.
 _AUTO_PLAY_POLL_S = 0.5
 _AUTO_PLAY_ARM_POLLS = 60  # 60 * 0.5s = 30s
+
+# Cue UUIDs are passed straight through to the engine's setnextcue command. We
+# only validate the SHAPE (canonical 8-4-4-4-12 hex UUID) to catch fat-finger /
+# multi-word input before it reaches the engine to be silently discarded; we
+# cannot validate that the UUID actually exists in the loaded project.
+_CUE_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 def _now() -> str:
@@ -140,6 +150,10 @@ class Bridge:
             # NNG hub. Distinct from shutdown's `nodes_pending` (avahi names).
             "autoload_pending": list(self._autoload_pending),
             "auto_load_armed": self.engine.armed,
+            # UUID of the cue that fires on the next GO (engine broadcasts it on
+            # /engine/status/nextcue; cached in engine_state). Lets a Companion
+            # button confirm a /setnextcue selection took effect.
+            "nextcue": self.engine.nextcue,
             "shelly_timer_armed_s": self.cfg.shelly_safety_timer_s,
             "last_error": self._last_error,
             "displays": self.displays.snapshot(),
@@ -198,6 +212,79 @@ class Bridge:
             return self._err("engine_send_failed", 502)
         log.info("STOP forwarded to engine")
         return self._ok()
+
+    async def _extract_cue(
+        self, request: web.Request
+    ) -> tuple[str | None, web.Response | None]:
+        """Pull a cue UUID from `?cue=` or a JSON body `{"cue": ...}` (same
+        query-then-JSON pattern as handle_brightness). Returns (cue, None) on
+        success or (None, error_response) for missing/malformed input."""
+        cue = request.query.get("cue")
+        if not cue:
+            try:
+                body = await request.json()
+                cue = (body or {}).get("cue")
+            except Exception:
+                cue = None
+        if not cue:
+            return None, self._err("missing_cue", 400)
+        if not _CUE_RE.match(cue):
+            return None, self._err("invalid_cue", 400)
+        return cue, None
+
+    async def handle_setnextcue(self, request: web.Request) -> web.Response:
+        """Select/arm a specific cue WITHOUT firing it (engine
+        /engine/command/setnextcue <uuid>). The controller relays it over NNG to
+        the node-engine, which moves its next-cue pointer; the following GO (this
+        endpoint's /go, or /gocue) fires it. A 200 means the OSC frame reached
+        the controller, NOT that the UUID exists in the loaded project — an
+        unknown-but-well-formed UUID is silently ignored by the node (the prior
+        pointer stays). Does not require armed: selecting is valid on any loaded
+        project."""
+        if not self._check_token(request):
+            return self._err("bad_token", 401)
+        if not self._rate.allow("setnextcue"):
+            return self._err("rate_limited", 429)
+        if not self.engine.is_known():
+            return self._err("engine_state_unknown", 503)
+        if not self.engine.project_loaded():
+            return self._err("no_project_loaded", 409)
+        cue, err = await self._extract_cue(request)
+        if err is not None:
+            return err
+        sent = await self.engine.send_osc("/engine/command/setnextcue", cue)
+        if not sent:
+            return self._err("engine_send_failed", 502)
+        log.info("setnextcue %s forwarded to engine", cue)
+        return self._ok({"cue": cue})
+
+    async def handle_gocue(self, request: web.Request) -> web.Response:
+        """Select a specific cue and fire it: setnextcue <uuid> then go, sent
+        back-to-back over the same ordered WS so the engine processes them in
+        order. Same gates as /setnextcue plus the /go arm gate. Allowed while a
+        project is running (parity with /go) — it advances to the chosen cue and
+        never stops the current one. Partial state: if setnextcue succeeds but go
+        fails (WS dropped between frames) this returns 502 and the node pointer
+        may already have moved, so a later operator GO would fire it."""
+        if not self._check_token(request):
+            return self._err("bad_token", 401)
+        if not self._rate.allow("gocue"):
+            return self._err("rate_limited", 429)
+        if not self.engine.is_known():
+            return self._err("engine_state_unknown", 503)
+        if not self.engine.project_loaded():
+            return self._err("no_project_loaded", 409)
+        if self.engine.armed != "yes":
+            return self._err("not_armed", 409)
+        cue, err = await self._extract_cue(request)
+        if err is not None:
+            return err
+        if not await self.engine.send_osc("/engine/command/setnextcue", cue):
+            return self._err("engine_send_failed", 502)
+        if not await self.engine.send_osc("/engine/command/go"):
+            return self._err("engine_send_failed", 502)
+        log.info("gocue %s forwarded to engine (setnextcue+go)", cue)
+        return self._ok({"cue": cue})
 
     async def handle_poweron(self, request: web.Request) -> web.Response:
         """Power displays ON on demand — symmetric with /shutdown's
@@ -826,6 +913,8 @@ class Bridge:
         app.router.add_get("/status", self.handle_status)
         app.router.add_post("/go", self.handle_go)
         app.router.add_post("/stop", self.handle_stop)
+        app.router.add_post("/setnextcue", self.handle_setnextcue)
+        app.router.add_post("/gocue", self.handle_gocue)
         app.router.add_post("/poweron", self.handle_poweron)
         app.router.add_post("/shutdown", self.handle_shutdown)
         app.router.add_post("/brightness", self.handle_brightness)

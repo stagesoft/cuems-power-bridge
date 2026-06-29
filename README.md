@@ -137,8 +137,8 @@ Stream Deck Nano ─USB─► Bitfocus Companion ─HTTP POST /go|/stop|/shutdow
 **What each layer does:**
 
 * **Bitfocus Companion** — Stream Deck button interface; issues HTTP POSTs to `/go`, `/stop`,
-  `/shutdown` using Companion's HTTP module. The bridge translates these to WebSocket-OSC
-  frames for the engine, or to the full shutdown sequence.
+  `/setnextcue`, `/gocue`, `/shutdown` using Companion's HTTP module. The bridge translates
+  these to WebSocket-OSC frames for the engine, or to the full shutdown sequence.
 * **Shelly Pro 1** — wired flip-switch triggered by a physical power switch (SW0). On
   transition to OFF the bundled mJS script fires an HTTP POST to `/shutdown`. The Shelly also
   acts as the mains relay: `Switch.Set toggle_after` arms a hardware timer that cuts power
@@ -176,6 +176,12 @@ The central coordinator. Owns the HTTP server, the state machine, and all sub-cl
 * **`Bridge.handle_go(request)`** — `POST /go`; validates token, checks rate limit, checks
   `engine.armed == "yes"`, sends `/engine/command/go` as a binary OSC impulse.
 * **`Bridge.handle_stop(request)`** — `POST /stop`; same flow without the armed check.
+* **`Bridge.handle_setnextcue(request)`** — `POST /setnextcue`; validates token/rate, requires
+  a loaded project, extracts+validates the cue UUID (`?cue=` or JSON body), sends
+  `/engine/command/setnextcue <uuid>`.
+* **`Bridge.handle_gocue(request)`** — `POST /gocue`; same gates as `/setnextcue` plus the
+  `armed` check, then sends `/engine/command/setnextcue <uuid>` followed by
+  `/engine/command/go`.
 * **`Bridge.handle_shutdown(request)`** — `POST /shutdown`; acquires `asyncio.Lock`, runs
   the refuse-if-running guard, then delegates to `_run_shutdown()`.
 * **`Bridge._run_shutdown()`** — implements the 8-step shutdown sequence:
@@ -590,6 +596,7 @@ Content-Type: application/json
   "since":                "2026-05-27T14:30:00Z",
   "engine_state":         "loaded",
   "nodes_pending":        [],
+  "nextcue":              "0123abcd-4567-89ab-cdef-0123456789ab",
   "shelly_timer_armed_s": 60,
   "last_error":           null
 }
@@ -601,6 +608,7 @@ Content-Type: application/json
 | `since` | ISO-8601 UTC | Timestamp of the last state transition |
 | `engine_state` | string | `unknown` (disconnected or cache empty), `idle` (no project), `loaded`, `running` |
 | `nodes_pending` | list[string] | Avahi hostnames still being polled during reachability phase |
+| `nextcue` | string | UUID of the cue that fires on the next GO (engine's cached `/engine/status/nextcue`); confirms a `/setnextcue` selection took effect |
 | `shelly_timer_armed_s` | int | Configured `shelly_safety_timer_s` (informational) |
 | `last_error` | string\|null | Reason token from the last failure |
 
@@ -650,6 +658,75 @@ HTTP/1.1 200 OK
 | 429 | `rate_limited` | Called within 200 ms of the previous call |
 | 502 | `engine_send_failed` | WebSocket send failed |
 | 503 | `engine_state_unknown` | Engine disconnected or cache empty |
+
+---
+
+#### `POST /setnextcue`
+
+Select (arm) a specific cue **without** firing it, by UUID. Sends
+`/engine/command/setnextcue <uuid>`; the controller relays it over NNG to the node-engine,
+which moves its next-cue pointer. The following GO — this endpoint's `/go`, or `/gocue` —
+fires it. The cue UUID is read from `?cue=<uuid>` **or** a JSON body `{"cue":"<uuid>"}`.
+
+> A 200 means the OSC frame reached the controller, **not** that the UUID exists in the
+> loaded project. A well-formed but unknown UUID is silently ignored by the node (the prior
+> pointer stays); only the UUID *shape* is validated here, not its existence. Confirm the
+> selection took effect via `GET /status` → `nextcue`.
+
+```
+POST /setnextcue?cue=0123abcd-4567-89ab-cdef-0123456789ab HTTP/1.1
+X-Auth-Token: <token>
+
+HTTP/1.1 200 OK
+{"ok": true, "cue": "0123abcd-4567-89ab-cdef-0123456789ab"}
+```
+
+| Status | Reason token | Condition |
+|---|---|---|
+| 200 | — | setnextcue sent (`cue` echoed in body) |
+| 400 | `missing_cue` | No `cue` in query or JSON body |
+| 400 | `invalid_cue` | `cue` is not a canonical UUID |
+| 401 | `bad_token` | Token mismatch |
+| 409 | `no_project_loaded` | No project loaded (`load == ""`) |
+| 429 | `rate_limited` | Called within 200 ms of the previous `/setnextcue` |
+| 502 | `engine_send_failed` | WebSocket send failed |
+| 503 | `engine_state_unknown` | Engine disconnected or cache empty |
+
+Does **not** require `armed` — selecting a cue is valid on any loaded project.
+
+---
+
+#### `POST /gocue`
+
+Select a specific cue and fire it in one call: `/engine/command/setnextcue <uuid>` then
+`/engine/command/go`, sent back-to-back over the same ordered WebSocket so the engine
+processes them in order. Same input (`?cue=` or JSON `{"cue":...}`) and gates as
+`/setnextcue`, **plus** the `/go` arm gate. **Allowed while a project is running** (parity
+with `/go`): it advances to the chosen cue and never stops the current one — consistent with
+the "never auto-stop a running project" rule.
+
+```
+POST /gocue?cue=0123abcd-4567-89ab-cdef-0123456789ab HTTP/1.1
+X-Auth-Token: <token>
+
+HTTP/1.1 200 OK
+{"ok": true, "cue": "0123abcd-4567-89ab-cdef-0123456789ab"}
+```
+
+| Status | Reason token | Condition |
+|---|---|---|
+| 200 | — | setnextcue + go sent (`cue` echoed in body) |
+| 400 | `missing_cue` / `invalid_cue` | Missing or malformed `cue` |
+| 401 | `bad_token` | Token mismatch |
+| 409 | `not_armed` | Engine `armed != "yes"` |
+| 409 | `no_project_loaded` | No project loaded |
+| 429 | `rate_limited` | Called within 200 ms of the previous `/gocue` |
+| 502 | `engine_send_failed` | WebSocket send failed |
+| 503 | `engine_state_unknown` | Engine disconnected or cache empty |
+
+> **Partial state:** if `setnextcue` succeeds but `go` fails (WebSocket dropped between the
+> two frames) this returns 502; the node's cue pointer may already have moved, so a later
+> operator GO would fire it.
 
 ---
 
@@ -1063,6 +1140,8 @@ Add three buttons using Companion's **HTTP** module:
 |---|---|---|---|
 | GO | POST | `http://controller.local:8478/go` | `X-Auth-Token: <token>` |
 | STOP | POST | `http://controller.local:8478/stop` | `X-Auth-Token: <token>` |
+| SET NEXT CUE | POST | `http://controller.local:8478/setnextcue` | `X-Auth-Token: <token>`; body `{"cue":"<uuid>"}` |
+| GO CUE | POST | `http://controller.local:8478/gocue` | `X-Auth-Token: <token>`; body `{"cue":"<uuid>"}` |
 | SHUTDOWN | POST | `http://controller.local:8478/shutdown` | `X-Auth-Token: <token>` |
 
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
