@@ -1,3 +1,18 @@
+cuems-power-bridge (0.3.0-5) unstable; urgency=medium
+
+  * cue triggering: add `POST /setnextcue` and `POST /gocue` so
+    Companion/Shelly can trigger a specific cue (UUID via `?cue=` or JSON
+    body), not just project-level GO/STOP. `/setnextcue` relays
+    `/engine/command/setnextcue <uuid>` (select/arm only, no armed gate);
+    `/gocue` sends setnextcue then go, gated on `armed` like `/go` and
+    allowed mid-show by parity. Both gate on `project_loaded()`
+    (409 no_project_loaded); malformed UUID -> 400 invalid_cue; distinct
+    rate-limit keys per endpoint. Surfaces `engine.nextcue` in GET /status
+    to confirm a selection took effect. Tests:
+    tests/test_bridge_gocue.py (17 cases). Refs: ClickUp 869dx367p.
+
+ -- Ion Reguera <ion@stagelab.coop>  Mon, 06 Jul 2026 17:31:30 +0200
+
 cuems-power-bridge (0.3.0-4) UNRELEASED; urgency=medium
 
   * displays: add projector brightness presets over Epson ESC/VP21
