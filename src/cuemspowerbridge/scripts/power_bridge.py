@@ -20,10 +20,40 @@ log = logging.getLogger(__name__)
 
 
 def _setup_logging(level: str) -> None:
+    # force=True is the load-bearing part: this runs inside main() AFTER all
+    # imports, and without it a single import-time logging call from any
+    # third-party module (aiohttp and friends do this) implicitly installs a
+    # root handler first — at which point basicConfig() silently no-ops and
+    # the configured format AND --log-level are lost.
+    #
+    # Handler choice: under systemd (JOURNAL_STREAM set) use the syslog
+    # transport — stdout lines are stamped PRIORITY=6 regardless of level, so
+    # only /dev/log records let `journalctl -p` / `cuems-logs -e` filter
+    # truthfully. The explicit ident matches the unit's existing
+    # SyslogIdentifier=cuems-power-bridge, so both transports merge under one
+    # identifier. On a terminal, keep the human-readable stdout format.
+    if os.environ.get("JOURNAL_STREAM"):
+        from logging.handlers import SysLogHandler
+
+        handler: logging.Handler = SysLogHandler(
+            address="/dev/log", facility=SysLogHandler.LOG_LOCAL0
+        )
+        handler.ident = "cuems-power-bridge: "
+        handler.setFormatter(
+            logging.Formatter("%(levelname)-7s %(name)s: %(message)s")
+        )
+    else:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+            )
+        )
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
+        force=True,
+        handlers=[handler],
     )
 
 
