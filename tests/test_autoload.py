@@ -219,3 +219,84 @@ def test_stop_cancels_inflight_auto_load_task():
     assert b._auto_load_task is None
     assert b.engine.stopped is True
     assert b.editor.stopped is True
+
+
+# --- settle margin on a SINGLE-CONTROLLER cluster -------------------------
+#
+# The settle used to live inside the "wait for remote node-engines" branch, so a
+# cluster whose network_map lists no slave skipped it and fired project_ready
+# within seconds of boot -- before its own local node-engine had registered its
+# players. The project loaded but never armed, and arming fell to
+# auto_load_armed_timeout_s alone (measured: armed 2min08 after boot instead of
+# ~35 s). These pin the settle to auto_load_wait_nodes, not to the presence of
+# remote nodes.
+
+def _settle_bridge(*, wait_nodes, settle_s, slaves):
+    b = _bridge()
+    b.cfg.auto_load_wait_nodes = wait_nodes
+    b.cfg.auto_load_node_settle_s = settle_s
+    b.engine.load = "projX"
+    b.engine.armed = "yes"
+
+    async def fake_expected():
+        return slaves
+
+    b._expected_node_ips = fake_expected
+    return b
+
+
+def _run_recording_sleeps(b):
+    """Run one attempt, returning (outcome, [sleep durations])."""
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def spy(delay, *a, **kw):
+        slept.append(delay)
+        return await real_sleep(0)
+
+    async def main():
+        asyncio.sleep = spy
+        try:
+            return await b._try_auto_load()
+        finally:
+            asyncio.sleep = real_sleep
+
+    return asyncio.run(main()), slept
+
+
+def test_single_controller_cluster_still_settles():
+    """No slave in the map must NOT mean "load immediately"."""
+    b = _settle_bridge(wait_nodes=True, settle_s=10, slaves=[])
+    outcome, slept = _run_recording_sleeps(b)
+    assert outcome == "armed"
+    assert 10 in slept, f"settle skipped on a single-controller cluster: {slept}"
+
+
+def test_wait_nodes_off_does_not_settle():
+    """An operator who disabled the node wait gets no added latency."""
+    b = _settle_bridge(wait_nodes=False, settle_s=10, slaves=[])
+    outcome, slept = _run_recording_sleeps(b)
+    assert outcome == "armed"
+    assert 10 not in slept, f"settled despite auto_load_wait_nodes=False: {slept}"
+
+
+def test_multi_node_cluster_settles_after_bus_wait(monkeypatch):
+    """The pre-existing multi-node path must keep its settle."""
+    from cuemspowerbridge import cluster_bus
+
+    b = _settle_bridge(wait_nodes=True, settle_s=7,
+                       slaves=[("10.0.0.9", "node01")])
+    called = {}
+
+    async def fake_wait(ips, port, **kw):
+        called["ips"] = set(ips)
+        return cluster_bus.BusPollResult(elapsed_s=0.0, connected=set(ips))
+
+    # monkeypatch rather than a bare assignment: cluster_bus is shared, and
+    # leaving a fake bus-wait installed would silently disarm any later test
+    # that depends on the real one.
+    monkeypatch.setattr(cluster_bus, "wait_until_engines_on_bus", fake_wait)
+    outcome, slept = _run_recording_sleeps(b)
+    assert outcome == "armed"
+    assert called["ips"] == {"10.0.0.9"}, "remote node was not waited for"
+    assert 7 in slept, f"settle lost on the multi-node path: {slept}"

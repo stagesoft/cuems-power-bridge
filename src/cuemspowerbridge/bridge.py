@@ -646,10 +646,34 @@ class Bridge:
                 )
             else:
                 self._autoload_pending = []
-            # (3) Small settle margin after bus-connect before loading.
-            await asyncio.sleep(self.cfg.auto_load_node_settle_s)
         else:
             self._autoload_pending = []
+            if self.cfg.auto_load_wait_nodes:
+                # SINGLE-CONTROLLER CLUSTER (network_map lists no slave with an
+                # <ip>): there is no REMOTE node-engine to wait for, but this box
+                # still runs its own node-engine, and the engine cannot reach
+                # armed until that node's players have registered. cluster_bus
+                # can never observe it — it strips loopback and the controller's
+                # own IP by design, because its signal is "remote node peers on
+                # the hub". So there is nothing to poll and the settle margin is
+                # the only thing standing between us and a project_ready that is
+                # too early.
+                #
+                # Measured at Medina 2026-08-06 (cupula1, standalone, no slave in
+                # the map): project_ready went out 3 s after start, the local
+                # node-engine registered its players 1 s later, and the project
+                # loaded but NEVER armed — the engine does not re-arm by itself.
+                # Arming then waited on auto_load_armed_timeout_s alone, so the
+                # show came up armed 2 min 08 after boot instead of ~35 s.
+                log.info("auto-load: no remote node-engine in network_map "
+                         "(single-controller cluster) — settling %ds for the "
+                         "local node-engine's players before loading",
+                         self.cfg.auto_load_node_settle_s)
+        # (3) Settle margin before loading: after bus-connect on a multi-node
+        # cluster, alone on a single-controller one. Skipped entirely when the
+        # operator has turned the node wait off.
+        if self.cfg.auto_load_wait_nodes:
+            await asyncio.sleep(self.cfg.auto_load_node_settle_s)
 
         # (4) Fire project_ready.
         if not self.editor.connected:

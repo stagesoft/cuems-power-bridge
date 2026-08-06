@@ -59,6 +59,26 @@ version in `pyproject.toml` has not yet been bumped.
 
 ### Fixed
 
+- **Auto-load fired `project_ready` too early on a single-controller cluster** — the
+  node-settle margin (`auto_load_node_settle_s`) lived *inside* the "wait for remote
+  node-engines on the NNG hub" branch, which is entered only when `network_map.xml`
+  lists at least one slave with an `<ip>`. A standalone controller (controller **and**
+  node on one box, no slave in the map) therefore skipped the settle entirely and sent
+  `project_ready` within seconds of bridge start — before its **own local** node-engine
+  had registered its players. The project loaded but never armed, and since the engine
+  does not re-arm by itself, arming fell to `auto_load_armed_timeout_s` alone.
+  `cluster_bus` cannot cover this case by design: it strips loopback and the
+  controller's own IP, because its signal is deliberately "*remote* node peers on the
+  hub". The settle is now keyed to `auto_load_wait_nodes` rather than to the presence
+  of remote nodes, so it applies after bus-connect on a multi-node cluster and on its
+  own for a single-controller one; `auto_load_wait_nodes = false` still skips it.
+  Measured at Medina (cupula1, standalone): `project_ready` at +3 s, players
+  registered at +4 s, armed only via the 125 s backstop — **2 min 08 after boot**.
+  Cutting the backstop to 30 s got the same box to 35 s as a stopgap; this fix removes
+  the need for the early attempt to fail at all. Note a multi-node cluster was never
+  affected, which is why it went unnoticed: there the bus wait supplied the grace
+  period as a side effect.
+
 - **Auto-load editor-success race logged a false failure** (0.2.1-1) — when the editor's
   `project_ready` acknowledgement arrived before `wait_engine`'s first sleep cycle in
   `_try_auto_load`, the function fell through to the "timed out waiting for engine status"
