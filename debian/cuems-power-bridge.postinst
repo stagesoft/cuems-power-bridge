@@ -9,7 +9,8 @@ set -e
 # 1. Drop a starter /etc/cuems/power-bridge.conf if none exists (operator
 #    customises Shelly URL, shared_token, auto_load_project, etc).
 # 2. Generate the SSH keypair used to ssh+poweroff cluster nodes.
-# 3. Reload systemd to pick up the unit shipped in cuems-common.
+# 3. Reload systemd state. The unit (debian/cuems-power-bridge.service) ships
+#    from this package; dh_installsystemd enables it via #DEBHELPER#.
 
 CONF=/etc/cuems/power-bridge.conf
 DEFAULT_CONF=/usr/share/cuems/power-bridge.conf.default
@@ -43,7 +44,7 @@ case "$1" in
             echo "cuems-power-bridge: run 'cuems-power-bridge-deploy-keys <node>...' to authorise nodes."
         fi
 
-        # Reload systemd if available (unit is shipped by cuems-common).
+        # Reload systemd state if available (unit ships from this package).
         if command -v deb-systemd-helper >/dev/null 2>&1; then
             deb-systemd-helper update-state >/dev/null 2>&1 || true
         elif command -v systemctl >/dev/null 2>&1; then

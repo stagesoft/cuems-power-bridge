@@ -42,5 +42,5 @@ Description: CUEMS power bridge — Shelly + Companion shutdown coordinator
  .
  Installs into /usr/lib/cuems/ virtualenv (provided by cuems-utils).
  Console entry points at /usr/lib/cuems/bin/{cuems-power-bridge,
- cuems-power-bridge-deploy-keys,cuems-wsclient}. systemd unit is shipped
- in cuems-common.
+ cuems-power-bridge-deploy-keys,cuems-wsclient}. The systemd unit
+ cuems-power-bridge.service ships in this package.
