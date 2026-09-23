@@ -46,7 +46,9 @@ Neither produces an error, a warning, or a failed test.
 - **Q2 — Who provides `/etc/cuems/settings.xml`, which the new reading path requires?**
   **A:** `cuems-utils` will ship it into `/etc/cuems`, so every host that has the CUEMS
   packages has the file. It therefore becomes a declared, versioned dependency of this
-  component rather than an operator-hand-placed file. (See **FR-015**, **Dependencies**.)
+  component rather than an operator-hand-placed file. Confirmed 2026-09-23: this is part of
+  the **same unreleased refactor**, not a later release — so is the platform package's half.
+  (See **FR-018**, **Dependencies**.)
 - **Q3 — Should the bridge honour the per-node `adopted` flag?**
   **A:** Yes. Shutdown targets adopted machines only — **unless `force` is set, which
   means "power off every machine in the system"**. (See **Shutdown target selection**,
@@ -437,9 +439,9 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
 
 - **Owning library (`cuems-utils`)** — the public configuration interface, the role
   vocabulary, the adoption flag, the schema, **and the shipped host identity document**
-  (Q2). Must be released before this feature ships, and its version is the lower bound of
-  FR-016. The packaging change that ships the identity document is work in that repository
-  and is tracked there.
-- **Platform package (`cuems-common`)** — its power-off tool is changed in the same release,
-  or the library surface it calls is kept compatible (FR-015); the packaging must express
-  whichever is chosen.
+  (Q2). All of it is in flight in the same unreleased refactor, so this is a coordinated
+  cutover rather than a wait; that version is the lower bound of FR-016.
+- **Platform package (`cuems-common`)** — its power-off tool is changed in the same
+  unreleased version; the packaging expresses the pairing mechanically (FR-015).
+- **Release shape** — the three halves are unreleased and land together. None ships alone,
+  and nothing in the feature ships before every flow of the wider migration lands.

@@ -267,9 +267,30 @@ bundle the aiohttp stack (unique to this package).
 | New refusal tokens and status fields | R7 — additive; 409 policy, 503 unknowable |
 | Where evidence lives | R8, R9, R10 — `specs/001-node-role-parser/evidence/` |
 
-## Still open (external, tracked)
+## Versions — all three halves are unreleased and land together
 
-- **The `cuemsutils` version floor** (FR-016): pending the `cuems-utils` release that ships
-  `/etc/cuems/settings.xml` (Q2). Blocking for release, not for implementation.
-- **The `cuems-common` version** that carries the fixed `cuems-cluster-poweroff`, needed for
-  the `Breaks:` on this side. Fixed at cutover time by whichever repository releases first.
+Measured 2026-09-23, confirmed by the user: nothing here waits on a published release. The
+whole refactor is in flight across the three repositories simultaneously.
+
+| Repository | Version carrying its half | State |
+|---|---|---|
+| `cuems-utils` | `0.1.0rc16` (`src/cuemsutils/__init__.py:4`) — ships `/etc/cuems/settings.xml` | unreleased, on `feat/xml-refactor` |
+| `cuems-common` | `1.3.0-23` (`debian/changelog:1`, marked **UNRELEASED**) — carries the fixed `cuems-cluster-poweroff` | unreleased, on `feat/xml-refactor` |
+| `cuems-power-bridge` | next version after `0.3.0-6` — proposed **`0.3.1-1`** (behaviour change: two new refusals, adoption filtering) | this feature |
+
+Resulting version relationships, concrete rather than placeheld:
+
+- `pyproject.toml`: `cuemsutils = ">=0.1.0rc16,<0.1.1"`, non-optional
+- `debian/control` (this package): `cuems-utils (>= 0.1.0rc16)`, `cuems-common (>= 1.3.0-23)`,
+  `Breaks: cuems-common (<< 1.3.0-23)`
+- `cuems-common/debian/control`: `Breaks: cuems-power-bridge (<< 0.3.1-1)`, `Suggests:`
+  unchanged and unversioned
+
+Since `1.3.0-23` is still open, the fix to `cuems-cluster-poweroff` lands **in that same
+changelog entry** rather than opening a new revision.
+
+Open only as verification, not as unknowns:
+
+- confirm the built `cuems-utils` `0.1.0rc16` `.deb` installs `/etc/cuems/settings.xml`
+  (Phase F);
+- confirm the bridge's own release number at cut time if `0.3.1-1` is not what is used.

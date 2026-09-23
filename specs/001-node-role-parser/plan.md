@@ -165,8 +165,9 @@ single-controller branch gated on a successful read; cache keyed on both documen
 executor.
 
 **Phase D — packaging and prose**
-`cuemsutils` real and bounded in `pyproject.toml` and `debian/control` (floor pending the
-release that ships `settings.xml`); `Breaks:` both ways; the retired vocabulary removed from
+`cuemsutils` real and bounded — `>=0.1.0rc16,<0.1.1` in `pyproject.toml`, `cuems-utils
+(>= 0.1.0rc16)` in `debian/control`; `cuems-common (>= 1.3.0-23)` + `Breaks: cuems-common
+(<< 1.3.0-23)`, with the reciprocal `Breaks: cuems-power-bridge (<< 0.3.1-1)` in Phase E; the retired vocabulary removed from
 `debian/control:34` and the README; the operator documentation FR-024 requires.
 
 **Phase E — the sibling half**
@@ -182,7 +183,7 @@ the two hardware rehearsals plus the negative one (quickstart §4–§6).
 
 | Risk | Mitigation |
 |---|---|
-| The `cuemsutils` floor cannot be written until that repository ships `settings.xml` | Recorded as a blocking **release** dependency, not an implementation one; a placeholder floor with a task to fill it, never a guess (research R2) |
+| The `settings.xml` precondition depends on another repository | Not a wait: `cuems-utils` ships it in the same unreleased refactor (`0.1.0rc16`), so the floor is concrete. Residual risk is only verification — a Phase F task asserts the built `cuems-utils` `.deb` installs the file (research R2) |
 | A half-upgraded pair fails mid-poweroff | `Breaks:` in both directions; a task rehearses the refusal on a test host (quickstart §4) |
 | A stub library in tests re-creates the silent-empty failure in the test bed | Tests run against the real loader with schema-valid fixtures (research R6) |
 | Stripping/bundling mistakes break a sibling component through the shared venv | `dpkg-deb -c` gate before shipping (research R10); this has happened before with `pythonosc` and the engine |
@@ -190,7 +191,16 @@ the two hardware rehearsals plus the negative one (quickstart §4–§6).
 
 ## Sequencing outside this repository
 
+All three halves are **unreleased and in flight together** — nothing here waits on a
+published artifact (user, 2026-09-23):
+
+| Repository | Version carrying its half | State |
+|---|---|---|
+| `cuems-utils` | `0.1.0rc16` — ships `/etc/cuems/settings.xml` | unreleased, `feat/xml-refactor` |
+| `cuems-common` | `1.3.0-23` (**UNRELEASED** in its changelog) — the fixed `cuems-cluster-poweroff` lands in this same entry | unreleased, `feat/xml-refactor` |
+| this package | proposed `0.3.1-1` | this feature |
+
 - Independent of every other 010 flow: nothing here needs them and they do not need this.
-- **Must** land simultaneously with `cuems-common`'s half (Phase E).
-- **Cannot release** before the `cuems-utils` version that ships `/etc/cuems/settings.xml`.
+- **Must** land simultaneously with `cuems-common`'s half (Phase E), expressed by the
+  reciprocal `Breaks:` pair — not by prose.
 - Does not release first regardless (D27: nothing ships until every 010 flow lands).
