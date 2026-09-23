@@ -85,6 +85,13 @@ classification the HTTP layer maps to a refusal:
 **Rule**: `TopologyError` is never caught and converted into an empty `Selection`. The two
 are mutually exclusive outcomes — that mutual exclusivity *is* the feature.
 
+**Measured source exceptions** (research R2a): `FileNotFoundError` (which file is named in
+the message), `SchemaError` (retired vocabulary detected by its own named message; anything
+else is an invalid document) and `ValueError: Node with uuid <uuid> not found`. A
+`network_map.xml` whose `node_list` is **empty** raises that last one too — so Case 1 can
+only ever mean "the self entry is present and nothing else is", never "the document said
+nothing".
+
 ---
 
 ## 3. State transitions — the shutdown sequence

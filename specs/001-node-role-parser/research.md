@@ -107,6 +107,53 @@ cuems-utils' decision, not this feature's.
 
 ---
 
+## R2a. Smoke test of the library's real behaviour — measured 2026-09-23
+
+Run before implementation, against `cuemsutils 0.1.0rc16` installed from the sibling
+checkout (`uv run --with /home/stagelab/cuems-utils`), using the corpus fixture
+`../cuems-utils/tests/data/corpus/cuems-utils/` as a known-good pair of documents.
+
+**The happy path works as the plan assumed.** `ConfigManager(config_dir=…,
+load_all=False)` then `load_network_map()` returns a `CuemsNetworkMapType` whose
+`["node_list"]` is the list of `{"node": …}` wrappers; `node_role` **is** a `NodeRole`
+enum member (identity comparison confirmed), `adopted` **is** a real `bool`, and
+`node_network_map` resolves this host's entry from `settings.xml`'s uuid.
+
+**Every failure mode raises, named and actionable** — three exception types, which is the
+whole classification table for `TopologyError`:
+
+| Provoked condition | Raised | Classifies as |
+|---|---|---|
+| `settings.xml` absent | `FileNotFoundError: Configuration file <path>/settings.xml not found` | `settings_xml_missing` |
+| `network_map.xml` absent | `FileNotFoundError: … network_map.xml not found` | `network_map_missing` |
+| retired `<node_type>` present | `SchemaError: <path>: node <uuid> still carries the retired <node_type> element (value 'NodeType.slave') — …` | `network_map_retired_vocabulary` |
+| this host's uuid not in the map | `ValueError: Node with uuid <uuid> not found` | `self_entry_missing` |
+| node missing `<mac>` | `SchemaError: … is not a valid network_map document: failed validating <Element 'node'> …` | `network_map_invalid` |
+| non-canonical uuid (`u-n1`) | `SchemaError: … failed validating 'u-n1' with XsdPatternFacets(…)` | `network_map_invalid` |
+| **`node_list` emptied entirely** | `ValueError: Node with uuid <self uuid> not found` | `self_entry_missing` |
+
+**Two findings that change the design's risk profile:**
+
+1. **Case 1 cannot be counterfeited by an empty document.** A `network_map.xml` with no
+   `<node>` at all does not yield an empty node list — it **raises**, because the self
+   entry cannot be resolved. So "the map says this cluster is one machine" (Case 1)
+   necessarily means *the self entry is present and nothing else is*, and the degenerate
+   "document says nothing" collapses into Case 5 without the adapter having to detect it.
+   The `TopologyError`/empty-`Selection` mutual exclusivity is therefore enforced by the
+   library as well as by us.
+2. **The library logs every internal call at DEBUG**, through a decorator, on a logger
+   whose records carry the `FormitGo` application name. On a controller this is the
+   bridge's journal. The adapter MUST bound the `cuemsutils` logger's level rather than let
+   it inherit the bridge's (CLAUDE.md already records a logging fix in this package:
+   `force=True` plus the syslog transport, `cef9d3d`). Otherwise a `DEBUG`-level bridge
+   floods syslog on every topology read, and topology reads now happen on the auto-load
+   retry loop as well as at shutdown.
+
+**Conclusion**: no blocker. The library is usable exactly as the plan describes, and the
+error-kind mapping is measured rather than assumed.
+
+---
+
 ## R3. What `adopted` means when it is absent
 
 **Measured.** In `network_map.xsd` the node element declares `adopted` with
@@ -259,6 +306,7 @@ bundle the aiohttp stack (unique to this package).
 
 | Unknown from Technical Context | Resolution |
 |---|---|
+| Does the library actually work from the sibling checkout, and what does each failure raise? | R2a — smoke-tested 2026-09-23; three exception types, mapped |
 | How the tool/bridge boundary survives the cutover | R1 — both repositories land together, `Breaks:` both ways, `Suggests:` preserved |
 | How the library reader is constructed, and what a missing `settings.xml` does | R2 — `config_dir` from `settings_xml_path`, `load_all=False`, every failure classified into Case 5 |
 | Meaning of an absent `adopted` flag | R3 — not adopted; Case 3 makes it loud |

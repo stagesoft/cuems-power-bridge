@@ -19,7 +19,8 @@ independently and are verified separately; either alone is a shippable improveme
 
 **Revision 2026-09-23** (post-`/speckit-analyze`): adds Case 3b coverage, the partial-
 resolution rule, the three-state readiness gate, message-content assertions, and moves the
-fixtures into `tests/fixtures/network_map/`.
+fixtures into `tests/fixtures/network_map/`. T014a/T014b were added after the library
+smoke test (research R2a).
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -72,7 +73,9 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 - [ ] T011 Implement `readiness_peers(...)` in `src/cuemspowerbridge/network_map.py` — adopted machines only (FR-009, confirmed Q4), **trusting** `<ip>`, skipping an adopted machine without one into `skipped(no_ip)` so the caller can tell "no adopted machine at all" from "adopted machines with no address" (FR-013)
 - [ ] T012 Delete the private parser from `src/cuemspowerbridge/network_map.py` — `NS`, `_text`, the `Node` dataclass with its `node_type` field, `parse()`'s ElementTree scan, `slave_avahi_names()`, `slave_ips()` — and rewrite the module docstring, removing the retired vocabulary at `:5,9,58-59,120`
 - [ ] T013 Derive the library's `config_dir` from `settings_xml_path` in `src/cuemspowerbridge/config.py`, and raise `TopologyError(config_dir_mismatch)` when `network_map_path` is not in that directory (research R2)
+- [ ] T014a Bound the `cuemsutils` logger in `src/cuemspowerbridge/network_map.py` (or the daemon's logging setup) so the library's per-call DEBUG records cannot flood the controller's journal when the bridge runs at DEBUG — research R2a finding 2; topology reads now also happen on the auto-load retry loop
 - [ ] T014 [P] Test the adapter in `tests/test_network_map_adapter.py` against the Phase-1 fixtures: both resolution policies, the absent-`adopted` default, every `Skip` reason, the `partial` flag, and one test per `TopologyError` kind — explicitly including `self_entry_missing` (FR-019) and `config_dir_mismatch`
+- [ ] T014b [P] Assert in `tests/test_network_map_adapter.py` that a `cuemsutils` DEBUG record does not propagate to the bridge's root logger at the bridge's own level (T014a)
 - [ ] T015 [P] Assert message **content** in `tests/test_network_map_adapter.py`: every `TopologyError` names the offending path or machine and an actionable remedy; `network_map_retired_vocabulary` names `cuems-migrate-network-map`; `settings_xml_missing` names the package that provides the file (FR-026, SC-003, SC-014)
 - [ ] T016 [P] Rewrite `tests/test_network_map_ips.py` onto the schema-valid fixtures in both vocabularies — the current-vocabulary one asserting correct selection, the retired-vocabulary one asserting the load **raises** (FR-020)
 
