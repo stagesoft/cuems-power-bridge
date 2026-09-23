@@ -14,3 +14,7 @@ debian/cuems-power-bridge/
 debian/files
 debian/.debhelper/
 debian/debhelper-build-stamp
+
+# uv is only a test runner here (the project builds with Poetry); its lock
+# file is a local artifact, not project state.
+uv.lock
