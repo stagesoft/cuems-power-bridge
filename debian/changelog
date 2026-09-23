@@ -1,3 +1,44 @@
+cuems-power-bridge (0.3.1-1) unstable; urgency=medium
+
+  * network_map: the private ElementTree reader is REPLACED by cuemsutils'
+    public configuration path. The old reader filtered nodes on the string
+    "NodeType.slave"; cuems-utils feature 007 renamed that element to
+    <node_role> and cuems-common's postinst converts every installed map, so
+    on every upgraded controller the filter matched NOTHING. Both features
+    that read the topology came back empty and said nothing: orderly
+    power-off selected zero nodes, skipped the "are they down?" poll, armed
+    the Shelly and cut mains on running nodes; and boot auto-load took its
+    single-controller path and loaded the show before the node engines
+    joined. Neither raised, warned, or failed a test — the suite was green
+    because its fixtures were written in the retired vocabulary.
+  * shutdown: an empty node selection is no longer indistinguishable from
+    success. Six outcomes, all documented in README: a controller-only map
+    proceeds; adopted nodes are targeted by default; 409 no_adopted_nodes
+    when the map lists nodes but none is adopted; 409 no_resolvable_nodes
+    when none can be addressed; 503 topology_unreadable when the map cannot
+    be read; and a partial selection proceeds but is logged at ERROR and
+    marked partial in /status. force=1 now also powers off unadopted nodes,
+    and still cannot override either refusal that rests on evidence.
+  * shutdown: the reachability poll no longer skips itself when the target
+    list is empty. The one case where the selection was wrong was also the
+    case that skipped the check which would have caught it.
+  * auto-load: waits for adopted nodes only, and enters the single-controller
+    settle path only after a SUCCESSFUL read. A missing or unreadable map
+    previously produced an empty list that was indistinguishable from a
+    genuine standalone cluster — the old reader swallowed FileNotFoundError
+    and returned [].
+  * status: new node_selection object (mode, found, adopted, targeted,
+    partial, skipped, read_ok, read_error) so a monitor can see all of this
+    without triggering a shutdown. No existing key, token or code changed
+    meaning.
+  * packaging: cuemsutils becomes a real, non-optional, upper-bounded
+    dependency (>=0.1.0rc16,<0.1.1) in pyproject.toml and debian/control;
+    Breaks: cuems-common (<< 1.3.0-23), whose cuems-cluster-poweroff carries
+    the other half of this cutover. The pair upgrades together or dpkg
+    refuses, instead of failing part-way through a poweroff transaction.
+
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 23 Sep 2026 09:02:39 +0000
+
 cuems-power-bridge (0.3.0-6) unstable; urgency=medium
 
   * auto-load: apply the node-settle margin on a SINGLE-CONTROLLER cluster.

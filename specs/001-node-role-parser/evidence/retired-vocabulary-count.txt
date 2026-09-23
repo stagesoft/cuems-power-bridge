@@ -1,0 +1,24 @@
+# T048 — retired-vocabulary count after feature 001 (FR-023, SC-011)
+# Date:   2026-09-23T09:03:14+00:00
+# Commit: 23fce84
+
+## Shipped code and shipped prose — MUST be zero
+$ git grep -nE "NodeType\.(master|slave)" -- src debian/control debian/rules README.md CLAUDE.md
+(no matches — zero)
+
+## Exempt, with reasons
+  tests/fixtures/network_map/map-pre007/network_map.xml — EXISTS to prove the
+      retired document is refused. Removing it would remove the guarantee.
+  tests/test_network_map_ips.py — asserts that fixture raises, and that the
+      message names cuems-migrate-network-map.
+  src/cuemspowerbridge/network_map.py — the words "node_type"/"retired" appear
+      in the CLASSIFIER that recognises the retired document and in the
+      operator-facing error text. Naming what you refuse is not using it.
+  debian/changelog — history, including this release's own entry.
+  specs/ — the planning and feature record.
+
+## Excluded by reason, not by oversight
+  src/cuemspowerbridge/wsclient.py:69-70 — `master.local` is an mDNS HOSTNAME,
+      not the role field. Renaming it changes what a deployed host answers to.
+69:    parser.add_argument('--host', default='master.local',
+70:                        help='controller mDNS/IP (default: master.local)')

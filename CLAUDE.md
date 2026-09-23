@@ -17,7 +17,7 @@ Part of the **CUEMS** ecosystem — see the [`cuems-RELATIONS`](https://github.c
 - `GET /status` → `state`, `engine_state`, `nodes_pending`, `shelly_timer_armed_s`, `last_error` (+ brightness/display keys).
 - `POST /go` → `/engine/command/go` (409 `not_armed` if the engine isn't armed).
 - `POST /stop` → `/engine/command/stop`.
-- `POST /shutdown[?force=1]` → orderly shutdown. Refuses 409 `project_running` unless `force=1` or `refuse_if_running=false` (**consistent with the project-wide "never auto-stop a running project" rule**; a LOADED-but-not-playing engine is NOT "running"). Other codes: 409 `shutdown_already_in_progress`, 503 `engine_state_unknown`, 502 `shelly_unreachable`, 401 `bad_token`.
+- `POST /shutdown[?force=1]` → orderly shutdown. Refuses 409 `project_running` unless `force=1` or `refuse_if_running=false` (**consistent with the project-wide "never auto-stop a running project" rule**; a LOADED-but-not-playing engine is NOT "running"). Other codes: 409 `shutdown_already_in_progress`, 409 `no_adopted_nodes`, 409 `no_resolvable_nodes`, 503 `engine_state_unknown`, 503 `topology_unreadable`, 502 `shelly_unreachable`, 401 `bad_token`. **`force` overrides policy, never evidence**: it powers off unadopted nodes too and ignores a running project, but cannot override an unreadable map or a target set nothing can address. NB the shipped Shelly mJS sends `force=1` by default, so the wall switch kills everything and does not stop for a running show (`--safe` flips it).
 - `POST /setnextcue` / `POST /gocue` — cue triggering (shipped in 0.3.0-5).
 - `POST /brightness?level=<name>` — projector brightness presets via Epson ESC/VP21 over ESC/VP.net (TCP 3629); 200 all / 207 partial / 502 all-failed / 400 unknown_level / 503 none.
 
@@ -25,7 +25,7 @@ All endpoints validate the optional `X-Auth-Token` header against `power-bridge.
 
 ## Shutdown flow (fail-safe ordering)
 
-asyncio-lock (concurrent calls → 409) → token + refuse-if-running guard → parse `network_map.xml` for every `NodeType.slave` avahi hostname (`role_id.local` / `alias.local` / `hostname.local`, **never** raw `<ip>`) → parallel `ssh cuems-admin@<host> sudo /sbin/poweroff` (fire-and-forget) → reachability poll (ICMP + TCP/22) until silent or `shutdown_max_wait_s` → Shelly `Switch.GetStatus` pre-check (abort if already off) → arm Shelly hardware safety timer `Switch.Set {on:true, toggle_after: shelly_safety_timer_s}` → local `sudo systemctl poweroff --no-block` → Shelly cuts mains on the already-off box. **Fail-safe:** if the Shelly RPC fails after 3 retries the bridge does NOT poweroff locally (returns 502) — staying up beats powering off without a confirmed mains-cut deadline.
+asyncio-lock (concurrent calls → 409) → token + refuse-if-running guard → read `network_map.xml` through `cuemsutils` for every **adopted** `NodeRole.node` avahi hostname (`role_id.local` / `alias.local` / `hostname.local`, **never** raw `<ip>`) → parallel `ssh cuems-admin@<host> sudo /sbin/poweroff` (fire-and-forget) → reachability poll (ICMP + TCP/22) until silent or `shutdown_max_wait_s` → Shelly `Switch.GetStatus` pre-check (abort if already off) → arm Shelly hardware safety timer `Switch.Set {on:true, toggle_after: shelly_safety_timer_s}` → local `sudo systemctl poweroff --no-block` → Shelly cuts mains on the already-off box. **Fail-safe:** if the Shelly RPC fails after 3 retries the bridge does NOT poweroff locally (returns 502) — staying up beats powering off without a confirmed mains-cut deadline.
 
 ## Boot auto-load
 

@@ -1,0 +1,27 @@
+# T001 — pre-migration parser failure (FR-021, SC-008)
+# THIS OUTPUT CANNOT BE REPRODUCED AFTER THE PRIVATE PARSER IS DELETED (T012).
+#
+# Date:    2026-09-23T08:50:27+00:00
+# Commit:  d3382b0 on 001-node-role-parser
+# Fixture: tests/fixtures/network_map/map-two-adopted/network_map.xml
+#          (schema-valid, current <node_role> vocabulary, two adopted nodes
+#           node01/node02 with role_id and <ip>, plus the controller self entry)
+#
+# Command:
+#   uv run --python 3.11 python -c '<see below>'
+
+$ python -c 'from cuemspowerbridge import network_map; print(...)'
+slave_avahi_names(converted) -> ([], [])
+slave_ips(converted)         -> []
+
+parse(converted) yields:
+    Node(uuid='0367f391-ebf4-48b2-9f26-000000000001', avahi='controller.local', role_id='controller', alias=None, hostname=None, node_type=None, ip='192.168.1.10')
+    Node(uuid='0367f391-ebf4-48b2-9f26-000000000002', avahi='node01.local', role_id='node01', alias=None, hostname=None, node_type=None, ip='192.168.1.102')
+    Node(uuid='0367f391-ebf4-48b2-9f26-000000000003', avahi='node02.local', role_id='node02', alias=None, hostname=None, node_type=None, ip='192.168.1.103')
+
+# EXPECTED (and the whole reason this feature exists):
+#   ([], [])  and  []  — two adopted nodes selected as ZERO, with an EMPTY
+#   unresolvable list, so not even the 'has no role_id/alias/hostname' ERROR
+#   path fires. No exception, no warning, no log line. The shutdown that
+#   follows powers off nobody, skips the reachability poll and arms the
+#   Shelly: the nodes lose mains while running.

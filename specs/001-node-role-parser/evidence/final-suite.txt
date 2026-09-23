@@ -1,0 +1,15 @@
+# T055 — final suite state (constitution Testing Gate)
+# Date:   2026-09-23T09:03:14+00:00
+# Commit: 23fce84
+# Runner: uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
+#           --with aiohttp --with websockets --with python-osc --with ../cuems-utils \
+#           python -m pytest -q
+
+tests/test_shutdown_cases.py .............                               [100%]
+
+============================= 185 passed in 16.57s =============================
+
+# Baseline before the feature was 142 passed (see baseline-suite.txt).
+# The 43 added tests are the adapter (27), the six shutdown cases (13) and
+# the readiness-gate additions; test_network_map_ips.py was rewritten from
+# fixtures that certified the defect into fixtures that discriminate.

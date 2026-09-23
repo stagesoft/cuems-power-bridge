@@ -2,48 +2,83 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 
-"""network_map.slave_ips(): (ip, role_id) of adopted slaves with an <ip>."""
+"""The two vocabularies, and the fixture that must FAIL against the old reader.
 
-from cuemspowerbridge.network_map import slave_ips
+This file used to pin the defect rather than the behaviour: its fixtures were
+written in the retired `<node_type>` vocabulary, so the suite stayed green
+BECAUSE it agreed with a parser that selected nothing from a converted
+document. Feature 001 replaces it with two fixtures that discriminate.
 
-_XML = """\
-<?xml version='1.0' encoding='utf-8'?>
-<cms:CuemsNetworkMap xmlns:cms="https://stagelab.coop/cuems/">
-<node_list>
-  <node><uuid>u-ctrl</uuid><node_type>NodeType.master</node_type>
-    <ip>169.254.9.204</ip><role_id>controller</role_id></node>
-  <node><uuid>u-n1</uuid><node_type>NodeType.slave</node_type>
-    <ip>169.254.13.233</ip><role_id>node01</role_id></node>
-  <node><uuid>u-n2</uuid><node_type>NodeType.slave</node_type>
-    <ip>169.254.13.234</ip><role_id>node02</role_id></node>
-  <node><uuid>u-n3-noip</uuid><node_type>NodeType.slave</node_type>
-    <role_id>node03</role_id></node>
-</node_list>
-</cms:CuemsNetworkMap>
+The pre-migration run is recorded in
+`specs/001-node-role-parser/evidence/pre-migration-parser-failure.txt`; it
+cannot be reproduced here, because the reader it exercised is gone. What is
+testable here is the other half of the guarantee: the retired document is now
+REFUSED rather than silently answered.
 """
 
+from __future__ import annotations
 
-def test_slave_ips_returns_slaves_with_ip(tmp_path):
-    p = tmp_path / "network_map.xml"
-    p.write_text(_XML)
-    result = slave_ips(str(p))
-    # controller excluded (master); node03 excluded (no <ip>).
-    assert result == [
-        ("169.254.13.233", "node01"),
-        ("169.254.13.234", "node02"),
+import pytest
+
+from cuemspowerbridge.network_map import (
+    TopologyError,
+    TopologyErrorKind,
+    readiness_peers,
+    shutdown_targets,
+)
+
+
+def _paths(d):
+    return str(d / "settings.xml"), str(d / "network_map.xml")
+
+
+# --------------------------------------------------------------------------
+# post-007 — the current vocabulary resolves correctly
+# --------------------------------------------------------------------------
+
+
+def test_post007_map_selects_its_adopted_nodes(conf_dir):
+    """The regression this feature exists to fix: two adopted nodes in the
+    current `<node_role>` vocabulary must select as TWO, not as zero."""
+    s, m = _paths(conf_dir("map-two-adopted"))
+    assert shutdown_targets(s, m).targets == ["node01.local", "node02.local"]
+
+
+def test_post007_map_yields_readiness_peers_by_ip(conf_dir):
+    """The readiness gate trusts <ip>, and used to come back empty too."""
+    s, m = _paths(conf_dir("map-two-adopted"))
+    assert readiness_peers(s, m).targets == [
+        ("192.168.1.102", "node01"),
+        ("192.168.1.103", "node02"),
     ]
 
 
-def test_slave_ips_label_falls_back_to_uuid(tmp_path):
-    xml = (
-        "<root><node_list><node><uuid>only-uuid</uuid>"
-        "<node_type>NodeType.slave</node_type><ip>10.0.0.9</ip></node>"
-        "</node_list></root>"
-    )
-    p = tmp_path / "nm.xml"
-    p.write_text(xml)
-    assert slave_ips(str(p)) == [("10.0.0.9", "only-uuid")]
+def test_readiness_label_falls_back_to_uuid(conf_dir):
+    """A node with no role_id/alias/hostname is still a bus peer (matched by
+    IP); its label degrades to the uuid rather than disappearing."""
+    s, m = _paths(conf_dir("map-unresolvable"))
+    labels = [label for _ip, label in readiness_peers(s, m).targets]
+    assert all(label.startswith("0367f391-") for label in labels)
 
 
-def test_slave_ips_missing_file(tmp_path):
-    assert slave_ips(str(tmp_path / "nope.xml")) == []
+# --------------------------------------------------------------------------
+# pre-007 — the retired vocabulary is refused, loudly
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("selector", [shutdown_targets, readiness_peers])
+def test_pre007_map_is_refused_not_silently_empty(conf_dir, selector):
+    """The whole class of defect in one assertion: a document this bridge can
+    no longer understand produces an ERROR, never an empty answer."""
+    s, m = _paths(conf_dir("map-pre007"))
+    with pytest.raises(TopologyError) as exc:
+        selector(s, m)
+    assert exc.value.kind is TopologyErrorKind.NETWORK_MAP_RETIRED_VOCABULARY
+
+
+def test_pre007_refusal_names_the_conversion_tool(conf_dir):
+    """An operator must be able to act on the message alone."""
+    s, m = _paths(conf_dir("map-pre007"))
+    with pytest.raises(TopologyError) as exc:
+        shutdown_targets(s, m)
+    assert "cuems-migrate-network-map" in str(exc.value)

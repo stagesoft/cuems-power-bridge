@@ -317,10 +317,11 @@ Shelly Gen 2 RPC client.
 Reads `/etc/cuems/network_map.xml` and resolves cluster nodes to Avahi hostnames.
 
 * **`Node`** — frozen dataclass: `uuid`, `avahi` (resolved `.local` name or `None`),
-  `role_id`, `alias`, `hostname`, `node_type` (`"NodeType.master"` | `"NodeType.slave"`).
+  `role_id`, `alias`, `hostname`, `role` (a `cuemsutils` `NodeRole`: `controller` |
+  `node` | `firstrun`), `adopted`, `ip`, `is_self`.
 * **`parse(path)`** — namespace-agnostic XML scan: accepts both namespaced and
   non-namespaced `<node>` elements; returns all nodes (master + slave).
-* **`slave_avahi_names(path)`** — filters to `NodeType.slave`; resolves each to an Avahi
+* **`shutdown_targets(...)`** — filters to adopted `NodeRole.node`; resolves each to an Avahi
   hostname using the priority `role_id.local` → `alias.local` → `hostname.local`. Returns
   `(resolved: list[str], unresolvable: list[Node])`. The `<ip>` field is intentionally
   ignored — it is a stale link-local in many adopted nodes.
@@ -473,7 +474,7 @@ either read-only (config, resolved node list) or protected by `asyncio.Lock`
 
 * **Orderly shutdown sequence** — the nine-step path from an HTTP trigger to confirmed
   mains-cut: token check → refuse-if-running guard → SSH fan-out to every
-  `NodeType.slave` node → reachability poll until all nodes are silent → Shelly pre-flight
+  adopted node → reachability poll until all nodes are silent → Shelly pre-flight
   check → arm `toggle_after` hardware timer → `systemctl poweroff --no-block` on the
   controller. The sequence is protected by `asyncio.Lock` so concurrent triggers (Shelly
   + Companion simultaneously) produce one shutdown and one 409.
@@ -735,6 +736,52 @@ HTTP/1.1 200 OK
 Run the full orderly cluster shutdown sequence. Concurrent calls return 409 immediately
 (only one shutdown sequence runs at a time).
 
+##### Which machines get powered off
+
+The bridge reads `/etc/cuems/network_map.xml` and picks its targets by role and adoption.
+Six outcomes are possible, and an operator should be able to predict which one they will
+get **before** flipping anything:
+
+| # | Situation | Outcome | Mains |
+|---|---|---|---|
+| 1 | The map lists only this controller | **Proceeds.** A controller-only system is an ordinary configuration, not an error. Nothing to power off, nothing to wait for; the log says so | cut |
+| 2 | Adopted nodes exist | **Proceeds.** Every **adopted** node is powered off and confirmed down first. Unadopted nodes are named in the log as skipped | cut |
+| 3 | Nodes exist, **none adopted** | **409 `no_adopted_nodes`.** Refuses, and names every node it skipped. Adopt them, or repeat with `force=1` | **not cut** |
+| 3b | Nodes would be targeted, **none addressable** (no `role_id`/`alias`/`hostname`) | **409 `no_resolvable_nodes`.** Refuses, and names them. Give each one a name in the map | **not cut** |
+| 4 | `force=1` | **Proceeds, targeting EVERY node in the map**, adopted or not | cut |
+| 5 | The map cannot be read at all — retired vocabulary, invalid document, missing `settings.xml`, this host absent from the map | **503 `topology_unreadable`** with a `detail` naming which. Refuses | **not cut** |
+
+**Partial selection.** If some targets resolve and others do not, the shutdown *proceeds*
+with the ones it can reach — refusing the whole shutdown because one node lost its name
+would leave the venue powered on, which is worse. It is never quiet: each unreachable node
+is logged at ERROR, and `GET /status` reports `node_selection.partial: true`. Those nodes
+stay up when mains is cut, which is exactly what the ERROR is there to tell you.
+
+##### What `force=1` does, and what it does not
+
+It has **two** effects:
+
+1. it shuts down even while a project is running;
+2. it powers off **every** node in the map, not just the adopted ones.
+
+And **two** non-effects — *`force` overrides policy, never evidence*:
+
+3. it does **not** override an unreadable map (case 5);
+4. it does **not** override a target set nothing can address (case 3b). An unreachable node
+   cannot be commanded off by asserting harder.
+
+> **The wall switch sends `force=1` by default.** The shipped Shelly script has
+> `FORCE = true`, so flipping the physical switch powers off every machine in the map and
+> does **not** stop for a running show. That is deliberate: the physical switch is the
+> operator's last resort and must always be able to kill the venue. Install with
+> `cuems-power-bridge-install-mjs --safe` to set `FORCE = false`, after which the switch
+> behaves like cases 2/3 above and refuses while a project runs.
+
+`GET /status` exposes the whole decision as `node_selection`
+(`mode`, `found`, `adopted`, `targeted`, `partial`, `skipped`, `read_ok`, `read_error`), so
+a monitor can tell a controller-only cluster (case 1) from an unreadable map (case 5)
+**without** triggering a shutdown to find out.
+
 ```
 POST /shutdown HTTP/1.1
 X-Auth-Token: <token>
@@ -764,7 +811,7 @@ X-Auth-Token: <token>
 
 1. Acquire `asyncio.Lock` — concurrent calls return 409.
 2. Token validation; refuse-if-running guard against the engine status cache.
-3. Parse `/etc/cuems/network_map.xml` → list of `NodeType.slave` Avahi hostnames
+3. Read `/etc/cuems/network_map.xml` (via `cuemsutils`) → Avahi hostnames of the adopted nodes
    (`role_id.local` → `alias.local` → `hostname.local`; `<ip>` is never used).
 4. Parallel `ssh cuems@<host> sudo /sbin/poweroff` to every node (fire-and-forget).
 5. Reachability poll: ICMP + TCP/22 fallback, 3 consecutive failures to confirm down,
@@ -1262,7 +1309,7 @@ bridge provides a single asyncio HTTP server on `:8478` that coordinates orderly
 shutdown for a Shelly Pro 1 flip-switch and a Bitfocus Companion Stream Deck. It maintains
 two persistent WebSocket connections (engine binary-OSC on `:9190`, editor JSON on `:9092`)
 with reconnect-with-backoff, implements a refuse-if-running guard against the engine status
-cache, SSH-fans-out `sudo poweroff` to every `NodeType.slave` from `network_map.xml`, polls
+cache, SSH-fans-out `sudo poweroff` to every adopted node from `network_map.xml`, polls
 reachability until all nodes are silent, arms the Shelly hardware safety timer, and issues
 `systemctl poweroff --no-block` on the controller. An auto-load feature configures a project
 to load on every boot via the editor's `project_ready` action. All side-effects are
