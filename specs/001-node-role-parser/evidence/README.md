@@ -21,6 +21,18 @@ retired vocabulary), so the artifacts below are part of the deliverable.
 | `upgrade-refusal.txt` | T045 | **Pending** — rehearse the refused half-upgrade (this package beside an un-fixed `cuems-common`) on a test host. |
 | `hardware-verification.md` | T056–T058 | **Pending** — the two rehearsals on a real cluster (power-off; auto-load), verified **separately**, plus the negative rehearsal (an unconverted map must refuse 503 and leave mains on, `force=1` included). |
 
+## Where the pending items now live
+
+The five rows marked **Pending** above are tracked on one ledger, with what to do, what each
+proves and why the suite cannot — shared with feature 002 and with the sibling repositories
+for a coordinated validation of the `xml-refactor-merge-candidate`:
+
+**`specs/002-cluster-poweroff-cli/checklists/hardware-verification.md`** (§1–§6 are this
+feature's; §7–§10 are feature 002's; the record sheet covers both).
+
+That file, `cuems-nodeconf`'s ledger and `cuems-common`'s `docs/upgrade-verification.md` are
+meant to be worked in one pass on the same machines.
+
 ## The one that matters most
 
 `pre-migration-parser-failure.txt` is the artifact the whole feature is

@@ -55,8 +55,9 @@ unchanged and remain enforced by the caller (the wrapper's per-stage `timeout`,
 `TimeoutStopSec=200`).
 
 **Constraints**: the product path's behaviour is frozen; the platform package must stay
-functional with this package absent; the venv library surface stays intact until
-`cuems-common` stops using it (release ordering, research R7)
+functional with this package absent; both halves land in one coordinated candidate, so the
+venv library surface is removed in the same change rather than kept alive for a transitional
+release (research R7)
 
 **Scale/Scope**: 1–8 machine clusters. Moves ~140 lines within this package, adds two CLI
 modules plus two shims, deletes 221 lines from the sibling.
@@ -97,7 +98,8 @@ specs/002-cluster-poweroff-cli/
 ├── contracts/
 │   └── cli.md           # argv + exit codes: the contract that REPLACES the venv surface
 ├── checklists/
-│   └── requirements.md  # spec quality checklist (all pass)
+│   ├── requirements.md         # spec quality checklist (all pass)
+│   └── hardware-verification.md # NEW: the ledger for features 001 AND 002, + record sheet
 └── tasks.md             # /speckit-tasks output — NOT created here
 ```
 
@@ -158,11 +160,14 @@ field by field; plus the call-graph assertion that the guard is unreachable from
 sequence.
 
 **Phase E — the sibling.** Delete both heredocs; the wrapper calls the tools and keeps its
-own responsibilities (research R8); `cuems-displays-on` uses the config query. `Breaks:
-cuems-power-bridge (<< 0.3.2-1)` in `cuems-common`.
+own responsibilities (research R8); `cuems-displays-on` uses the config query. Both halves
+land in the versions already open — `0.3.1-1` here, `1.3.0-23` there — under the coordinated
+`xml-refactor-merge-candidate` tag (research R7); feature 001's existing reciprocal `Breaks:`
+pair already forces them to move together, so no new version relationship is added.
 
-**Phase F — packaging, docs, gates.** Release `0.3.2-1`; README and CLAUDE.md gain the tool;
-`.deb` contents checked; the staged upgrade rehearsed in the documented order.
+**Phase F — packaging, docs, gates.** README and CLAUDE.md gain the tools; the tmpfiles rule
+ships; `.deb` contents checked; the **hardware-verification ledger** (research R7a) is written
+and carries every check that needs a real machine, for features 001 **and** 002.
 
 ## Risks and mitigations
 
@@ -171,14 +176,20 @@ cuems-power-bridge (<< 0.3.2-1)` in `cuems-common`.
 | The extraction silently changes the product path | Phase B is reviewed as a move, not a rewrite; quickstart §2 checks it by test, by call graph and by diff |
 | The new lock deadlocks or blocks a poweroff | Non-blocking acquisition only; kernel-released on death; a losing caller refuses rather than waits |
 | The guard leaks onto the transition path | It lives in the CLI entry point and is suppressed by `--transition`; a test asserts the sequence module never references the engine or `/status` |
-| A half-upgraded pair breaks a poweroff | Release order is bridge-then-common (research R7); the venv library surface is kept intact until common stops using it, and `Breaks:` prevents the reverse |
+| A half-upgraded pair breaks a poweroff | Both halves land under one candidate tag with feature 001's reciprocal `Breaks:` already in force, so dpkg refuses the mixed pair; the candidate is validated as a set on real machines before release (research R7, R7a) |
 | `/run/cuems-power-bridge` missing on first install | tmpfiles rule plus `systemd-tmpfiles --create` in `postinst`; the lock helper reports a clear precondition failure (exit 3) rather than proceeding unlocked |
 | Inherited self-exclusion changes daemon behaviour | Monotonic by construction (removes only this host); called out in the Constitution Check and covered by a test |
 
-## Sequencing
+## Sequencing and release
 
 - Independent of the NNG-native shutdown migration, which this feature **unblocks** by making
   `_shutdown_nodes()` a one-place change.
 - Independent of the systemd-unit relegation: units, conffile and sudoers stay put.
-- **Releases in two steps**, bridge first — unlike feature 001, this can be staged, and the
-  plan depends on that ordering being honoured.
+- **Lands in the coordinated candidate, not as a staged rollout** (research R7): this
+  repository stays at `0.3.1-1` and `cuems-common` at `1.3.0-23`, both tagged
+  `xml-refactor-merge-candidate` — `cuems-common`'s tag is **relocated** from `f2fc0f5`, which
+  predates even feature 001's half. `cuems-nodeconf` (`0.1.0-8` at `6c0cca7`) is the
+  precedent.
+- **Consumer-state validation is a deliverable of this feature**, not a follow-up: one
+  hardware-verification ledger covering features 001 and 002, plus a per-host record sheet, so
+  every repository's checks can be run together on production machines (research R7a).

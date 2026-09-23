@@ -148,8 +148,10 @@ observe it reports one clear message and does not fail the shutdown.
 
 1. **Given** a host without this package, **When** the system powers off, **Then** the
    platform script logs one clear line and completes without error.
-2. **Given** a host with an older version of this package, **When** the system powers off,
-   **Then** it still works — the change can be adopted gradually rather than in lockstep.
+2. **Given** the coordinated candidate installed as a set, **When** the system powers off,
+   **Then** it performs the orderly sequence; and **Given** a mixed pair, **When** an operator
+   attempts to install it, **Then** the package manager refuses rather than allowing a
+   half-upgraded poweroff.
 
 ---
 
@@ -249,9 +251,16 @@ observe it reports one clear message and does not fail the shutdown.
 
 **Adoption**
 
-- **FR-021**: The change MUST be adoptable gradually: a host with an older version of this
-  package MUST keep working until it is upgraded. This is explicitly unlike the previous
-  feature, which had to land in both packages at once.
+- **FR-021**: Both halves MUST land as one coordinated candidate, in the versions already
+  open, under the ecosystem's shared release tag — not as a staged rollout. The existing
+  version relationship between the two packages already forces them to move together; no new
+  one is added. The candidate is proven as a **set**, on real machines, before release.
+- **FR-021a**: Every check that needs real hardware, a real cluster or a human MUST be
+  recorded on a **hardware-verification ledger** in this repository, covering this feature and
+  the previous one, in the shape the sibling repositories already use: each entry states what
+  to do, what it proves and why the automated suite cannot, every box starts unchecked, and a
+  deferral is written down rather than implied. A per-host record sheet MUST accompany it so a
+  technician can work a production machine without reading either feature's prose.
 - **FR-022**: No operator-visible behaviour of the shutdown may change: not the HTTP surface,
   not the wall-switch behaviour, not the sequence, not the timings.
 
@@ -279,8 +288,11 @@ observe it reports one clear message and does not fail the shutdown.
   and rehearse a power-off that changes nothing.
 - **SC-005**: A host without this package installed still completes its shutdown, logging one
   clear line.
-- **SC-006**: A host with an older version of this package still performs an orderly
-  power-off, proving the change is adoptable gradually.
+- **SC-006**: The coordinated candidate performs an orderly power-off on a real controller,
+  and a mixed pair is refused by the package manager.
+- **SC-011**: Every hardware- or human-dependent check for this feature **and the previous
+  one** appears on one ledger with an explicit state; none is left to prose. A technician can
+  run the whole ecosystem's validation from the three repositories' ledgers in one pass.
 - **SC-007**: The four carried-over defects (FR-017 to FR-020) are each demonstrably fixed or
   preserved as specified.
 - **SC-009**: A second power-off attempt, from either entry point, is refused while one is in
@@ -321,6 +333,6 @@ observe it reports one clear message and does not fail the shutdown.
 ## Dependencies
 
 - **The platform package** — its power-off and display-confirmation scripts are edited in the
-  same work, but may be released separately (FR-021).
+  same work and land in the same coordinated candidate (FR-021).
 - **The previous feature** (node-role parser migration) — already merged; its selection
   function and its six outcomes are the starting point.

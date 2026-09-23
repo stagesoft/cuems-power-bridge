@@ -17,8 +17,11 @@ defect — a passing suite proves nothing here unless a fixture fails against th
 **Organization**: grouped by user story. US1 (shutdown) and US2 (auto-load) fail and recover
 independently and are verified separately; either alone is a shippable improvement.
 
-**Implementation status 2026-09-23**: 54 of 60 tasks done; the 6 marked ⛔ need a build
-host or a cluster and are listed in `evidence/README.md` as pending.
+**Implementation status 2026-09-23**: 54 of 60 tasks done. The 6 marked ⛔ need a build host
+or a cluster; they are now tracked on the shared ledger
+`specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` §1–§6, to be executed
+alongside `cuems-nodeconf`'s and `cuems-common`'s ledgers as one coordinated validation of the
+`xml-refactor-merge-candidate`.
 
 **Revision 2026-09-23** (post-`/speckit-analyze`): adds Case 3b coverage, the partial-
 resolution rule, the three-state readiness gate, message-content assertions, and moves the

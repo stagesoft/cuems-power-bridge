@@ -7,8 +7,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 **Feature**: `002-cluster-poweroff-cli` · **Status**: new. This contract **replaces** the
 undeclared venv library surface that `cuems-common` drives today (feature 001,
-`contracts/venv-library-surface.md`). Once `cuems-common` 1.3.0-24 ships, argv and exit codes
-are the whole boundary between the two packages.
+`contracts/venv-library-surface.md`). Once both halves land in the coordinated
+`xml-refactor-merge-candidate` (this repository at `0.3.1-1`, `cuems-common` at `1.3.0-23`),
+argv and exit codes are the whole boundary between the two packages.
 
 Both tools follow this repository's existing CLI shape: implementation in
 `src/cuemspowerbridge/scripts/<name>.py` with a usage + exit-status docstring, a

@@ -177,29 +177,58 @@ because it is set at import.
 
 ---
 
-## R7. Release order — genuinely staged, unlike feature 001
+## R7. Release model — one coordinated candidate, not a staged rollout
 
-Feature 001 had to land in both packages at once because a Python attribute vanished. This
-one does not, **if the order is right**:
+**Corrected 2026-09-23 (user).** An earlier draft of this research proposed shipping
+`cuems-power-bridge` 0.3.2-1 first and `cuems-common` 1.3.0-24 second, so the pair could be
+adopted gradually. **That is not how this ecosystem lands the xml refactor.** Every
+repository's half lands together under the coordinated tag **`xml-refactor-merge-candidate`**,
+each keeping the version it already holds:
 
-1. **`cuems-power-bridge` 0.3.2-1 first.** Adds the two tools and the extracted sequence,
-   and *keeps* the venv library surface (`load_nodes`, `shutdown_targets`, `config.load`,
-   `reachability`, `node_executor`, `displays.manager`) exactly as feature 001 left it. An
-   un-upgraded `cuems-common` keeps working through its heredocs.
-2. **`cuems-common` 1.3.0-24 second.** Deletes the heredocs, calls the tools, and declares
-   `Breaks: cuems-power-bridge (<< 0.3.2-1)` so it cannot be installed beside a bridge that
-   lacks them.
+| Repository | Version | Tag |
+|---|---|---|
+| `cuems-power-bridge` | **0.3.1-1** (open; features 001 and 002 both land in it) | tag created at the merge point |
+| `cuems-common` | **1.3.0-23** (`UNRELEASED`; both halves land in the same entry) | existing tag **relocated** — it currently sits at `f2fc0f5`, behind feature 001's half |
+| `cuems-nodeconf` | 0.1.0-8 (`UNRELEASED`) | tag at `6c0cca7` — the precedent this follows |
+| `cuems-utils` | 0.1.0rc16 | its own half |
 
-**Consequence**: at no point is there a combination that fails mid-poweroff. New bridge + old
-common works (heredocs); new both works (tools); new common + old bridge is refused by dpkg.
+**Consequences for this feature:**
 
-**After step 2**, `cuems-common` imports nothing from this package, and the frozen venv
-library surface (constitution Principle VII, feature 001's
-`contracts/venv-library-surface.md`) is **discharged**: the contract becomes the CLI's argv
-and exit codes. That is the deeper prize of this feature and should be stated in its
-completion notes.
+- **No new version.** The CLI, the extraction and the sibling's heredoc deletion all land in
+  `0.3.1-1` / `1.3.0-23`, beside feature 001.
+- **No `Breaks: cuems-power-bridge (<< 0.3.2-1)`.** Feature 001's existing reciprocal pair
+  (`cuems-common (<< 1.3.0-23)` ↔ `cuems-power-bridge (<< 0.3.1-1)`) already forces the two to
+  move together, and that is now the mechanism for both features at once.
+- **Mixed-version tolerance stops being a requirement.** The candidate is validated as a set,
+  on real machines, before anything is released. What replaces "it must survive a half
+  upgrade" is "the whole candidate is verified together" (R7a).
+- The venv library surface may therefore be **removed** in the same change rather than kept
+  alive for a transitional release — once `cuems-common` stops importing it, nothing does.
 
----
+## R7a. Consumer-state validation lands on a hardware checklist
+
+**Decision (user).** Everything that needs real hardware, a real cluster or a human goes on a
+**hardware-verification ledger** in this repository, following `cuems-nodeconf`'s and
+`cuems-common`'s existing strategies, so all three can be executed together on production
+machines as one coordinated validation of the candidate.
+
+**The shape, taken from the siblings** (measured):
+
+- `cuems-nodeconf`: `specs/<feature>/checklists/hardware-verification.md` — *one ledger for
+  BOTH its features*, every box unchecked until performed, each entry stating **Do / Proves /
+  Why the suite cannot**, and deferrals recorded explicitly rather than implied. Its companion
+  `evidence/verification-record.md` records what *was* done.
+- `cuems-common`: `docs/upgrade-verification.md` — operator-facing, ordered by upgrade step,
+  ending in a **copy-once-per-host record sheet**.
+
+**This repository adopts both halves**: a ledger under the feature that carries the debt
+(covering features 001 **and** 002, because 001's hardware items are still open), plus a
+per-host record sheet so a technician can work a production controller without reading either
+feature's prose.
+
+**Why a ledger rather than prose**: the constitution accepts "verified" and "not verified"; it
+does not accept silence. Feature 001 ended with six such items scattered across a task list
+and an evidence README — countable only by reading both.
 
 ## R8. What the wrapper keeps
 
@@ -239,5 +268,6 @@ That is a **behaviour addition on the product path** and must be called out: it 
 | Where the running-show guard may live | R3 — CLI entry point only, via `/status`; unreachable from the transition path |
 | Stage split and exit codes | R4 |
 | How `cuems-displays-on` stops importing us | R5 — `cuems-power-bridge-config --get` |
-| Release ordering | R7 — bridge first, then cuems-common with `Breaks:` |
-| Fate of the frozen library surface | R7 — discharged once cuems-common stops importing; the CLI contract replaces it |
+| Release model | R7 — one coordinated `xml-refactor-merge-candidate` tag, current versions, no staged rollout |
+| Where consumer-state validation lands | R7a — a hardware-verification ledger + record sheet, following cuems-nodeconf and cuems-common |
+| Fate of the frozen library surface | R7 — removed in the same change; the CLI contract replaces it |
