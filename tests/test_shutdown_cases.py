@@ -83,13 +83,17 @@ def _post(b: Bridge, *, force: bool = False):
 
 
 def _poweroff_calls(monkeypatch):
-    """Record SSH fan-out targets without touching the network."""
+    """Record SSH fan-out targets without touching the network.
+
+    Patched on `cluster_shutdown`, not `bridge`: feature 002 moved the two
+    stage bodies there. The assertions below are unchanged — only where the
+    seam sits moved."""
     seen: list[list] = []
 
     async def fake_poweroff_all(targets, dry_run=False):
         seen.append([t.host for t in targets])
 
-    monkeypatch.setattr("cuemspowerbridge.bridge.poweroff_all", fake_poweroff_all)
+    monkeypatch.setattr("cuemspowerbridge.cluster_shutdown.poweroff_all", fake_poweroff_all)
     return seen
 
 
@@ -106,7 +110,7 @@ def _no_poll(monkeypatch):
         polled.append(list(hosts))
         return _Result()
 
-    monkeypatch.setattr("cuemspowerbridge.bridge.wait_until_all_down", fake_wait)
+    monkeypatch.setattr("cuemspowerbridge.cluster_shutdown.wait_until_all_down", fake_wait)
     return polled
 
 

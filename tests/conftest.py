@@ -43,3 +43,18 @@ def conf_dir(monkeypatch):
 def _no_inherited_conf_path(monkeypatch):
     """A developer box with CUEMS_CONF_PATH exported must not steer the suite."""
     monkeypatch.delenv("CUEMS_CONF_PATH", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _lock_in_tmp(monkeypatch, tmp_path_factory):
+    """Point the power-off sequence lock at a temporary file.
+
+    The daemon and the ExecStop helper take a real lock under /run, created by
+    a tmpfiles rule. A suite that used it would depend on that directory
+    existing on whoever's machine runs the tests — and would pass or fail by
+    host accident. Every test gets its own lock file instead.
+    """
+    from cuemspowerbridge import shutdown_lock
+
+    lock = tmp_path_factory.mktemp("lock") / "shutdown.lock"
+    monkeypatch.setattr(shutdown_lock, "DEFAULT_LOCK_PATH", str(lock))
