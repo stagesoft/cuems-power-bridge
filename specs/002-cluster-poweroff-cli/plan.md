@@ -11,20 +11,29 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 ## Summary
 
-Extract the orderly power-off sequence out of `bridge.py` into its own module, give it an
-explicit context instead of six attributes read off a `Bridge`, and let two callers run
-it: the HTTP handler (which becomes a thin caller) and a new documented operator tool,
-`cuems-power-bridge-cluster-poweroff`. The 221 lines of this repository's Python currently
-embedded in `cuems-common`'s shell script are deleted there and replaced by invocations of
-that tool, and a second small tool, `cuems-power-bridge-config`, removes the last import from
-`cuems-displays-on`.
+Extract the **two power-off stage bodies and the machine selection** out of `bridge.py` into
+their own module, with an explicit context instead of attributes read off a `Bridge`, and let
+two callers orchestrate them: the HTTP handler, which keeps the relay and the local power-off
+to itself, and an **internal** helper invoked by the platform wrapper as
+`"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff`. The 221 lines of this
+repository's Python embedded in `cuems-common`'s shell script are deleted there; a second small
+tool, `cuems-power-bridge-config`, removes the last import from `cuems-displays-on`.
+
+**What is shared is selection and stage bodies — not a sequence.** The two callers orchestrate
+differently on purpose: the HTTP route fans the machine power-off and the display power-off out
+concurrently and then arms the relay; the transition path runs displays fully first (the
+machines feed the projectors), does a single liveness probe, and SSHes only the machines that
+answered alive. A shared sequence containing the relay would arm it twice per shutdown, because
+the HTTP route ends by triggering the transition that runs the other caller.
 
 **The user's framing is the plan's governing constraint**: the systemd + Shelly path is the
-product; the manual run is a maintenance, development, rehearsal and recovery tool. So the
-two safeguards this feature adds are placed where the product path cannot execute them — the
-running-show guard sits in the tool's entry point and is disabled by `--transition`, and the
-one thing that does touch the shared sequence (the cross-process lock) is taken identically
-by both callers, so it changes no decision.
+product; the manual run is a maintenance, development, rehearsal and recovery tool. **The
+product must always be able to power the venue off mid-show** — that is one of the wall
+switch's primary intents. So the running-show guard is *requested* by the caller
+(`--refuse-if-running`, passed only on the wrapper's manual path) and is therefore unreachable
+from a transition; and the one thing that does touch the shared code, the cross-process lock,
+is taken identically by both callers and released before the local power-off so the HTTP
+route's own re-entrant transition is never refused.
 
 This is a **relocation, a de-duplication and an extraction**, not a behaviour change. The one
 deliberate exception is stated and bounded: the daemon inherits the script's address- and
@@ -76,10 +85,12 @@ modules plus two shims, deletes 221 lines from the sibling.
 | **VI — the shared venv makes packaging correctness** | Yes. | Two console entries, two shims, one tmpfiles rule; nothing new bundled. The `.deb` bundling gate from feature 001 still applies. | quickstart §6 |
 | **VII — the external contract is the product** | **Centrally, and this feature discharges part of it.** | The frozen venv library surface exists because another package imports our modules. After this feature it imports nothing, and the contract becomes argv + exit codes — declared, versioned and probe-able. The HTTP surface is unchanged. | contracts/cli.md; research R7 |
 
-**Gate result: PASS.** One change to the product path is deliberate and is recorded rather
-than waved through: the daemon inherits address/name self-exclusion (data-model §5). It is
-monotonic — it can only remove this host from its own target list — and it is the behaviour
-the script has always had on that path.
+**Gate result: PASS.** Two changes to the product path are deliberate and recorded rather than
+waved through: the daemon inherits address/name self-exclusion (data-model §5, monotonic — it
+can only remove this host from its own target list), and both initiators move to one shared SSH
+host-key store (data-model §4a, which re-learns the fleet once under `accept-new`). Everything
+else on that path — the wrapper's guards, its `exit 0` discipline, the stage order, the
+liveness pre-pass, the interpreter override — is preserved verbatim.
 
 **Post-design re-check: still PASS.** The design adds no bundled dependency, no event-loop
 work in the daemon, and no change to an existing wire contract.
@@ -107,20 +118,21 @@ specs/002-cluster-poweroff-cli/
 
 ```text
 src/cuemspowerbridge/
-├── cluster_shutdown.py      # NEW: run_cluster_shutdown(ctx, decision, progress) — the
-│                            #   sequence, extracted from bridge.py:508-644, plus the
-│                            #   shared six-case decision and self-exclusion
+├── cluster_shutdown.py      # NEW: run_display_stage() + run_node_stage() — the two STAGE
+│                            #   bodies extracted from bridge.py:508-644, plus the shared
+│                            #   six-case decision and self-exclusion. NOT the relay, NOT
+│                            #   the local power-off: those stay in bridge.py (FR-001a)
 ├── shutdown_lock.py         # NEW: flock helper over /run/cuems-power-bridge/shutdown.lock
 ├── bridge.py                # handle_shutdown becomes a THIN caller: token, engine guard,
 │                            #   lock, topology read, decision, run, map outcome to HTTP
 ├── scripts/
-│   ├── cluster_poweroff.py  # NEW CLI: stages, exit codes, the /status running-show probe
+│   ├── cluster_poweroff.py  # NEW internal helper, run as `python -m`: stages, exit codes,
+│   │                        #   and the requested /status running-show probe. NO PATH shim
 │   └── config_get.py        # NEW CLI: --get <key>, for cuems-displays-on
-└── data/bin/…               # shims (see below)
+└── data/bin/…               # one shim only (see below)
 
 data/bin/
-├── cuems-power-bridge-cluster-poweroff   # NEW sh shim -> venv entry
-└── cuems-power-bridge-config             # NEW sh shim -> venv entry
+└── cuems-power-bridge-config             # NEW sh shim -> venv entry (read-only query)
 
 debian/
 ├── cuems-power-bridge.install            # + the two shims, + the tmpfiles rule
@@ -151,9 +163,10 @@ because both later phases take it, and because it is independently verifiable.
 self-exclusion (data-model §5). `handle_shutdown` becomes a thin caller. **Reviewed as a
 move**: the steps, their order and their log lines must be diff-able against the original.
 
-**Phase C — the tools.** `scripts/cluster_poweroff.py` (stages, exit codes, the `/status`
-guard, `--transition`) and `scripts/config_get.py`, each with the repository's standard
-docstring-and-`main()` shape, console entries, shims and install lines.
+**Phase C — the tools.** `scripts/cluster_poweroff.py` (stages, exit codes, the *requested*
+`/status` guard) and `scripts/config_get.py`, each with the repository's standard
+docstring-and-`main()` shape. A console entry and shim for the config query only; the
+power-off helper is reached as `python -m` through the interpreter the conffile names.
 
 **Phase D — equivalence tests.** Both entry points over every fixture, decisions compared
 field by field; plus the call-graph assertion that the guard is unreachable from the

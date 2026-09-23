@@ -16,6 +16,30 @@ Where the two disagree, the product wins, and anything added for the manual mode
 
 ---
 
+## R0. The wrapper is the usage-logic layer — read before anything else (2026-09-23)
+
+Re-read end to end after the second analysis pass. Almost none of its 156 bash lines are about
+invoking Python; they are the policy this path runs under, and they stay:
+
+| Guard / behaviour | Why |
+|---|---|
+| `enabled=false` kill switch | a fleet-wide upgrade must change no site's behaviour |
+| transaction check — `reboot`/`kexec` exit 0, **unknown** exits 0 | PJLink answers `ERR3` to `POWR 1` during cooldown, so killing lamps on a reboot returns to a dark room; unknown means skip, because powering a venue down unexpectedly is worse than not doing it |
+| stops `cuems-displays-on.service` first, bounded by `timeout 10s` | the boot watchdog must not `POWR 1` behind the sequence; a synchronous `systemctl` from inside a unit script has deadlocked this fleet before |
+| ordering probe on **every** path, including the skips | the design's central claim — network up, bridge already stopped — is invisible to inspection, so it is recorded every time |
+| `nodes_off=false` early return | a site choice that used to be expressible only by withholding an SSH key |
+| **`exit 0` on every path**; stage failures are WARNINGs; stage 1 failing still continues to stage 2 | an `ExecStop` that fails must never fail the stop it belongs to |
+| `$venv_python` from the conffile | both the override point and the missing-package guard |
+| `--force` = *run outside a poweroff transaction* | **the operator entry point already exists**, with `dry_run=true` as the documented rehearsal |
+
+Three consequences the first draft of this plan missed, each now a decision:
+
+1. the range this plan proposed to extract (`bridge.py:508-644`) **includes** the relay
+   pre-check, the mains-cut arming and the local power-off — none of which this path may do
+   (R1, corrected);
+2. the operator entry point exists already, so a second one must not be created (R4a);
+3. `--force` is taken, and means something else here (R4b).
+
 ## R1. Where the shared sequence lives — **the central decision**
 
 **Measured.** `bridge.py:508-644` is `_run_shutdown(selection)`: steps 5 through 10 of the
@@ -25,13 +49,27 @@ arm, local poweroff). It is a method on `Bridge` and reads six collaborators off
 `_nodes_pending`. `handle_shutdown` (`:348-470` after feature 001) holds the token check, the
 lock, the running-project guard, the topology read and the six-case decision.
 
-**Decision: extract the sequence into a new module, `src/cuemspowerbridge/cluster_shutdown.py`,
-as a plain async function over an explicit context — and make `handle_shutdown` a thin
-caller.** The user asked for a *proper end product*, not a shim: the CLI must not be a
-parallel path that happens to call the same selection function.
+**Decision (corrected 2026-09-23, analysis vs the wrapper): extract the two STAGE BODIES and
+the selection into `src/cuemspowerbridge/cluster_shutdown.py`; the relay and the local
+power-off stay in `bridge.py`.** The user asked for a proper end product, not a shim — but the
+product is not one sequence with two front doors. It is one *selection* and two *stage
+bodies*, orchestrated differently by two callers:
+
+| | HTTP route (`/shutdown`) | transition path (`ExecStop`) |
+|---|---|---|
+| machine fan-out and display power-off | **concurrent** | **sequential**: displays fully, then machines |
+| liveness pre-pass before the fan-out | none | `max_wait_s=0`, one confirmation, poller's logger silenced |
+| which machines are SSHed | every resolved target | **only those that answered alive** |
+| relay pre-check + mains-cut arming | **yes** | never |
+| local power-off | **yes** | never — systemd is already doing it |
+
+The shared functions are therefore `run_display_stage(ctx)` and `run_node_stage(ctx, decision,
+*, pre_pass: bool)`, plus the selection and the six-case decision. `handle_shutdown` calls them
+in its own order and then does the relay and the local power-off itself.
 
 ```
-run_cluster_shutdown(ctx, decision, *, progress) -> ShutdownOutcome
+run_display_stage(ctx, *, progress)                      -> StageOutcome
+run_node_stage(ctx, decision, *, pre_pass, progress)     -> StageOutcome
 ```
 
 where `ctx` carries `cfg`, `displays`, `shelly` and nothing else the sequence does not use;
@@ -163,17 +201,42 @@ one place to audit after a node is replaced.
 `HOME`; pinning it makes the behaviour explicit for both, and the file must be created (or
 tolerated absent) with `accept-new` semantics preserved.
 
-### R2b. Who may run it by hand — `sudo` (analysis H1)
+### R2b. Who may run it by hand — nobody, directly (supersedes the `sudo` decision)
 
-The lock lives at `0770 cuems cuems`. The operator account `cuems-admin` gets its **own**
-primary group (`cuems-common/debian/postinst:429-433`), so it is not in group `cuems` and
-cannot open that file. **Decision (user): manual runs require `sudo`**, and the tool says so —
-in its `--help`, in its module docstring, and in the README.
+The earlier answer to analysis H1 was "manual runs require `sudo`, and the tool says so". That
+question **disappears** under R4a: the tool installs no operator command, so the only callers
+are the privileged transition and the daemon. `cuems-admin` never opens the lock because
+`cuems-admin` never invokes the tool — it invokes `cuems-cluster-poweroff`, which runs as root
+under `sudo` exactly as it does today.
 
-The lock's mode stays as it is: widening it to make an unprivileged run work would hand the
-ability to block a cluster power-off to any account that can open the file. The failure is
-instead made legible — a permission error on the lock exits 3 with "run this with sudo",
-never proceeding unlocked.
+The lock stays `0770 cuems cuems`, and a permission error still exits 3 rather than proceeding
+unlocked — now as a genuine precondition failure rather than an expected operator experience.
+
+### R4a. The tool is internal, invoked as a module (analysis, Q6)
+
+**Decision (user):** the wrapper calls
+`"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff …`, and this package ships **no**
+shim on `PATH` for it.
+
+One choice, four properties preserved:
+
+- the conffile's `venv_python` override keeps working — the checklist's reason for insisting on
+  it;
+- the missing-package guard (`[ ! -x "$venv_python" ]` → one ERROR, exit 0) keeps working
+  unchanged, and needs no new probe;
+- `venv_python` stays live configuration, so analysis F2's dead-key problem never arises;
+- there remains exactly **one** operator command that powers the venue down.
+
+`cuems-power-bridge-config` still ships as a shim: it is a read-only query that
+`cuems-displays-on` needs on `PATH`, and it powers nothing off.
+
+### R4b. `--force` is already taken — the CLI does not use the word
+
+In the wrapper `--force` means *run outside a poweroff transaction*. On `/shutdown` it means
+*ignore a running project, and include unadopted machines*. A third meaning inside a tool the
+wrapper invokes would be indefensible, so the CLI spells its own knobs out:
+`--include-unadopted` for the selection policy, `--refuse-if-running` for the guard the wrapper
+requests on its manual path. Neither is called `--force`.
 
 ---
 

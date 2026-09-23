@@ -58,9 +58,64 @@ before and after.
   internals. Its polling loop and retry settings stay next to the configuration file that
   tunes them. (**FR-016**)
 
+### Session 2026-09-23 (second) — after reading the platform wrapper end to end
+
+- **Q5 — What may the shared implementation contain?** **A: the two stage bodies and the
+  machine selection, and nothing beyond them.** Arming the mains-cut relay and powering this
+  controller off stay with the HTTP route. The platform wrapper's own header explains why:
+  that route *"always arms a Shelly relay and fail-safes to HTTP 502 without powering the
+  controller off when no Shelly answers — correct for a mains-cut deadline, useless at a venue
+  with no Shelly. Here systemd is already powering the box off, so only steps 1-2 are needed."*
+  The HTTP route also **ends by triggering this very transition**, so a shared sequence that
+  armed the relay would arm it twice per shutdown.
+- **Q6 — Is the new tool operator-facing?** **A: no.** It is an internal helper, invoked
+  through the runtime environment's own interpreter, with no command on the operator's path.
+  The operator command stays the platform package's existing `cuems-cluster-poweroff --force`,
+  which already documents rehearsal. This also preserves the configuration override and the
+  missing-package guard, both of which name that interpreter.
+- **Q7 — Does a running show block this path?** **A: only a manual run, never a power-off.**
+  See **The running-show guard** below.
+
 **The constraint all three answers share**: this feature may not change what happens when the
 wall switch is flipped or the power button is pressed. Every safeguard it adds must be
 provably absent from that path.
+
+## The running-show guard *(normative)*
+
+**The product must always be able to power the venue off mid-show.** Cutting power during a
+performance is one of the wall switch's primary intents — it is the operator's last resort,
+and nothing this feature adds may stand between the switch and the relay.
+
+That invariant decides the whole question, because the two callers are not symmetric:
+
+| Caller | Is a show playing relevant? | Behaviour |
+|---|---|---|
+| **A power-off transaction** — wall switch, power button, `systemctl poweroff`, or the HTTP route's own final step | **No.** The machine is already going down; refusing would only skip the two stages, leaving the projectors lit and the machines running while the controller dies — the exact failure this work exists to remove | **Never checks.** No probe, no refusal, no new failure mode |
+| **A manual rehearsal run** | **Yes.** Nothing is powering off; the operator is present and can answer | **Refuses while a project is playing**, unless the operator says otherwise on that run |
+
+The discriminator is the **invocation**, and it is visible twice over: the platform wrapper
+knows which case it is in (it already inspects the transaction), and the daemon is
+unreachable during a transition anyway. Two independent signals agree, so the failure mode is
+always "the guard does not fire" and never "the guard blocks a shutdown".
+
+**The manual path is unguarded today**, and destructive: it stops the boot watchdog, blanks
+the fleet and powers the machines off with no check at all. Adding the guard there closes an
+existing hole; it adds nothing to the product path.
+
+**No configuration key.** The override is per-run, not a setting. A key that permanently
+disables a safety check is indistinguishable, months later, from the check never having
+existed, and leaves no trace in the journal of the run that needed it. A per-run override is
+one flag away when a recovery demands it and is recorded in that run's log.
+
+**Three edge cases, settled:**
+
+- the daemon cannot be reached on a manual run → **proceed**, with a warning; this is the same
+  "cannot know" the transition path lives in permanently;
+- the engine's state is unknown → **proceed**, with a warning. A wedged engine is the recovery
+  case the manual run exists for; refusing there would disable the tool exactly when it is
+  needed;
+- the run is a no-op rehearsal → **skip the guard**; a run that changes nothing cannot harm a
+  show, and refusing it is noise.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -111,25 +166,34 @@ display power-off and machine power-off — including every refusal.
 
 ---
 
-### User Story 3 - An operator can run and understand the tool (Priority: P2)
+### User Story 3 - The maintenance run is safe, and there is still only one of it (Priority: P2)
 
-An operator needs to rehearse a power-off, or diagnose one that went wrong, without reading
-the source or knowing where the runtime environment is installed.
+An engineer rehearses or recovers with the platform package's existing manual command. It must
+not have become a second way to power the venue down, and it must not go dark on a live show
+by accident.
 
-**Why this priority**: the tool becomes operator-facing for the first time. Today the logic
-is unreachable except by triggering a real shutdown.
+**Why this priority**: the manual path is the one this work makes reachable and testable. It is
+also unguarded today — it stops the boot watchdog, blanks the fleet and powers the machines
+off with no check at all.
 
-**Independent Test**: run the tool from a normal shell with no special paths, ask it for
-help, and rehearse a power-off without powering anything off.
+**Independent Test**: run the existing manual command during a rehearsal, and during a playing
+project, with and without the override.
 
 **Acceptance Scenarios**:
 
-1. **Given** an installed system, **When** an operator runs the tool by name, **Then** it is
-   found on the normal command path like this package's other tools.
-2. **Given** the tool, **When** an operator asks for help, **Then** it states what it does,
-   what each stage does, and what each exit status means.
-3. **Given** the rehearsal mode, **When** an operator runs it, **Then** it reports exactly
-   what it would do and changes nothing.
+1. **Given** an installed system, **When** an operator lists the commands available to them,
+   **Then** there is exactly one way to power the venue down — the platform package's existing
+   command — and the new tool is not on their path.
+2. **Given** a manual run while a project is playing, **When** it is issued without the
+   override, **Then** it refuses, names the project, and changes nothing.
+3. **Given** the same situation with the override, **When** it is issued, **Then** it proceeds
+   and the log records that the override was used.
+4. **Given** a manual run with the daemon unreachable, or the engine state unknown, or in
+   rehearsal mode, **When** it is issued, **Then** it proceeds with a warning rather than
+   refusing.
+5. **Given** the runtime environment is missing or overridden in configuration, **When** the
+   wrapper runs, **Then** the existing guard and the existing override both behave exactly as
+   before.
 
 ---
 
@@ -183,12 +247,23 @@ observe it reports one clear message and does not fail the shutdown.
 
 **One implementation**
 
-- **FR-001**: The power-off sequence MUST exist once. Both the command-line tool and the HTTP
-  route MUST execute the same implementation, not two implementations kept in agreement.
-- **FR-002**: The six documented power-off outcomes MUST be reproduced identically through
-  both routes: the decision, the refusal reasons, and the machines named.
-- **FR-003**: Machine selection, self-exclusion, the already-off fast path, and the timeout
-  policy MUST each exist in exactly one place.
+- **FR-001**: Machine **selection** and the two **stage bodies** — displays off, machines off
+  — MUST exist once and be executed by both callers. They are the parts that were duplicated.
+- **FR-001a**: The shared implementation MUST NOT contain, and MUST NOT be able to reach:
+  arming the mains-cut relay, pre-checking it, or powering this controller off. Those belong
+  to the HTTP route alone, which ends by triggering the transition that runs the other caller
+  — a shared sequence containing them would arm the relay twice per shutdown (Q5).
+- **FR-002**: The documented selection outcomes MUST be reproduced identically through both
+  routes: the decision, the refusal reasons, and the machines named. **Orchestration is
+  deliberately not identical**: the HTTP route fans the machine power-off and the display
+  power-off out concurrently, while the transition path runs displays fully first — the
+  machines feed the projectors, so blanking them first puts "no signal" on stage.
+- **FR-003**: Machine selection, self-exclusion, the already-off fast path and the per-stage
+  timeout policy MUST each exist in exactly one place.
+- **FR-003a**: The transition path's own sequencing MUST be preserved verbatim: displays
+  before machines; the single liveness pass (`max_wait_s=0`, one confirmation, its poller's
+  logger silenced) before the fan-out; and the fan-out addressed **only to machines that
+  answered alive**.
 
 **Relocation**
 
@@ -202,26 +277,31 @@ observe it reports one clear message and does not fail the shutdown.
 
 **The tool**
 
-- **FR-007**: The tool MUST be discoverable and runnable by name on an installed system,
-  consistent with this package's other operator tools, without the operator needing to know
-  where the runtime environment lives.
+- **FR-007**: The tool MUST be invoked through the runtime environment's own interpreter, the
+  one the platform wrapper already names in its configuration, and MUST NOT install any
+  command on the operator's path. This keeps three existing properties intact: the
+  configuration override of that interpreter, the missing-package guard that tests it, and the
+  rule that there is exactly **one** way for an operator to power the venue down (Q6).
 - **FR-008**: The tool MUST document, in its own help output, what it does, its stages, its
   options and the meaning of every exit status.
 - **FR-009**: The tool MUST report its outcome through exit status, distinguishing at least:
   completed (including "there was nothing to do"); a configuration or precondition failure;
   a **refusal**; and completed-but-some-machines-never-went-quiet.
+- **FR-009a**: The platform wrapper MUST translate those statuses into log lines and **still
+  exit 0 on every path that runs during a power-off transaction**, including stage failures —
+  an `ExecStop` that fails must never fail the stop it is part of. A refused **manual** run MAY
+  exit non-zero, because no transition is in progress and an operator should see a failure.
 - **FR-010**: The tool's output MUST remain readable line by line, because the calling script
   forwards each line to the system log.
 - **FR-011**: The tool MUST offer a rehearsal mode that exercises the whole sequence and
   changes nothing.
 - **FR-012**: The tool MUST take the caller's timing and policy values as arguments rather
   than reading the platform package's configuration file, which stays where it is.
-- **FR-013**: The shared sequence MUST assume neither execution identity — it runs as the
-  privileged account under the system transition and as the service account inside the daemon,
-  and reads no identity-dependent path directly. A **manual** run requires elevated privilege
-  (the sequence lock is owned by the service account, and the operator account is not in its
-  group); the tool MUST say so in its help and in its documentation, and MUST fail with a
-  precondition error rather than running without the lock.
+- **FR-013**: The shared implementation MUST assume neither execution identity — it runs as
+  the privileged account under the system transition and as the service account inside the
+  daemon, and reads no identity-dependent path directly. Because the tool is never invoked
+  directly by an operator (FR-007), no unprivileged path to it exists: the only callers are
+  the privileged transition and the daemon itself.
 
 **Safety decisions**
 
@@ -232,11 +312,19 @@ observe it reports one clear message and does not fail the shutdown.
   — reporting that a power-off is already in progress — rather than wait. The lock MUST be
   released automatically if its holder dies, so a killed process cannot block the next
   shutdown.
-- **FR-015**: A manual run MUST refuse while a project is playing unless explicitly forced.
-  This guard MUST live in the tool's entry point, NOT in the shared sequence: it asks the
-  running daemon, and when the daemon is unreachable — the system-transition case — no guard
-  runs and behaviour is byte-for-byte what it is today. A manual run with nothing playing
-  needs no flag.
+- **FR-015**: A **manual** run MUST refuse while a project is playing, unless the operator
+  overrides it on that run. A run that is part of a power-off transaction MUST NOT check at
+  all. The guard MUST live in the tool's entry point, never in the shared implementation, and
+  MUST be requested by the caller rather than inferred — so the transition path cannot reach
+  it even by accident (see **The running-show guard**).
+- **FR-015a**: The override MUST be a per-run argument, NOT a configuration key, and the run
+  that uses it MUST say so in its log.
+- **FR-015b**: The guard MUST fail open: an unreachable daemon, an unknown engine state, or a
+  no-op rehearsal all **proceed** with a warning rather than refusing.
+- **FR-015c**: **The power-off transaction MUST always complete, whatever is playing.** No
+  requirement in this feature may add a condition between the wall switch, the power button or
+  a `systemctl poweroff` and the machine going down. Powering the venue off mid-show is one of
+  the wall switch's primary intents.
 - **FR-016**: The display-confirmation script MUST stop importing this package's internals,
   and MUST instead obtain the two values it needs through a documented query this package
   provides. Its polling loop, its retry settings and its use of the local API stay as they
@@ -303,8 +391,11 @@ observe it reports one clear message and does not fail the shutdown.
   and no hardware — up from none today.
 - **SC-003**: Each of the six power-off outcomes is verified through **both** entry points,
   and the decisions match.
-- **SC-004**: An operator can run the tool by name, get help that states every exit status,
-  and rehearse a power-off that changes nothing.
+- **SC-004**: An operator has exactly one command that powers the venue down, unchanged from
+  today; the new tool appears on no operator path.
+- **SC-004a**: A manual run refuses during a playing project, proceeds with the override, and
+  proceeds with a warning when the daemon is unreachable, the engine state is unknown, or the
+  run is a rehearsal.
 - **SC-005**: A host without this package installed still completes its shutdown, logging one
   clear line.
 - **SC-006**: The coordinated candidate performs an orderly power-off on a real controller,
@@ -312,7 +403,11 @@ observe it reports one clear message and does not fail the shutdown.
 - **SC-012**: With the display switch off, a power-off through either entry point leaves every
   device untouched and still reports success.
 - **SC-013**: A power-off initiated through the API completes its re-entrant transition with
-  both stages running — the lock never refuses the transition the daemon itself caused.
+  both stages running — the lock never refuses the transition the daemon itself caused, and the
+  relay is armed exactly once per shutdown.
+- **SC-014**: **A power-off during a playing project completes, through every trigger the
+  product uses** — wall switch, power button and `systemctl poweroff` — with no condition added
+  by this feature. Verified on hardware.
 - **SC-011**: Every hardware- or human-dependent check for this feature **and the previous
   one** appears on one ledger with an explicit state; none is left to prose. A technician can
   run the whole ecosystem's validation from the three repositories' ledgers in one pass.
@@ -352,6 +447,8 @@ observe it reports one clear message and does not fail the shutdown.
 - Any change to the HTTP surface, the wall-switch script, or the shutdown's observable
   behaviour.
 - Merging the two configuration files.
+- Adding any operator-facing command: the new tool is internal, and the existing manual
+  command stays the only way to power the venue down by hand.
 
 ## Dependencies
 

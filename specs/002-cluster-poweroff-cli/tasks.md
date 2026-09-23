@@ -20,12 +20,22 @@ where it is maintained" (SC-002), and the equivalence tests are the deliverable 
 provably absent from it.
 
 **Revision 2026-09-23** (two `/speckit-analyze` passes). First pass: the lock spans a whole
-sequence, held by the wrapper across both stages (C1); manual runs require `sudo` and say so
-(H1); coverage fixes G1–G3, U1, F1, D1, A1. Second pass, against
+sequence, held by the wrapper across both stages (C1); coverage fixes G1–G3, U1, F1, D1, A1
+(H1's `sudo` answer was later superseded — see the third revision). Second pass, against
 `specs/planning/cuems-common-machinery-to-absorb.md` as an additional authority: the daemon
 releases the lock before the local power-off so its own re-entrant transition is not refused
 (C2); the display-stage config gate is preserved (G4); one shared SSH host-key store (G5); the
 lock path is injectable so the suite stops depending on `/run` (H2); plus F2, F3, G6, U2, D2.
+
+**Third revision 2026-09-23**, after reading the platform wrapper end to end (research R0) and
+three user decisions: (1) the **shared code is the two stage bodies plus selection** — the
+relay and the local power-off stay with the HTTP route, because that route ends by triggering
+the transition that runs the other caller; (2) the helper is **internal**, invoked as
+`"$venv_python" -m …`, so the conffile override and the missing-package guard keep working and
+there is still exactly one operator command; (3) the running-show guard is **requested** by the
+caller and applies to manual runs only — **the product must always be able to power the venue
+off mid-show**, which is one of the wall switch's primary intents. `--force` is no longer a
+flag of this helper: the word is taken twice already.
 
 **Release**: everything lands in the versions already open — `cuems-power-bridge 0.3.1-1`,
 `cuems-common 1.3.0-23` — under the coordinated `xml-refactor-merge-candidate` tag. The final
@@ -68,12 +78,13 @@ Baseline: **185 passed** (feature 001).
 
 **⚠️ Blocks every user story. T007–T011 are the extraction — reviewed as a move.**
 
-- [ ] T005 Implement `src/cuemspowerbridge/shutdown_lock.py`: a non-blocking exclusive `flock` over `/run/cuems-power-bridge/shutdown.lock`, as a context manager that raises a typed "already held" error rather than waiting; a **no-op mode** for a caller that already holds it (research R2a); a precondition failure when the directory is absent; and a `PermissionError` mapped to "run this with sudo" — **never proceed unlocked** (research R2b, data-model §4)
+- [ ] T005 Implement `src/cuemspowerbridge/shutdown_lock.py`: a non-blocking exclusive `flock` over `/run/cuems-power-bridge/shutdown.lock`, as a context manager that raises a typed "already held" error rather than waiting; a **no-op mode** for a caller that already holds it (research R2a); a precondition failure when the directory is absent; and a `PermissionError` reported as a precondition failure naming the lock path — **never proceed unlocked** (research R2b, data-model §4)
 - [ ] T005a Make the lock location a parameter of `src/cuemspowerbridge/shutdown_lock.py` defaulting to `/run/cuems-power-bridge/shutdown.lock`, and add a `tests/conftest.py` fixture pointing it at `tmp_path` — otherwise the 13 existing tests that call `handle_shutdown` directly start depending on `/run/cuems-power-bridge` existing on whoever's machine runs the suite (analysis H2)
 - [ ] T006 [P] Test the lock in `tests/test_shutdown_lock.py`: a second acquisition fails immediately; the lock is released when the holding process dies; a missing directory and an unreadable one are precondition errors, not unlocked runs; and the no-op mode does not acquire anything
-- [ ] T007 Create `src/cuemspowerbridge/cluster_shutdown.py` with `ShutdownContext` (`cfg`, `displays`, `shelly`, `progress` — and deliberately **no** `engine`) and `ShutdownOutcome` per [data-model.md](./data-model.md) §1, §3
+- [ ] T007 Create `src/cuemspowerbridge/cluster_shutdown.py` with `StageContext` (`cfg`, `displays`, `progress` — deliberately **no** `shelly`, no local-poweroff command, no `engine`) and `StageOutcome` per [data-model.md](./data-model.md) §1, §3
 - [ ] T008 Move the shared six-case decision into `src/cuemspowerbridge/cluster_shutdown.py` as a pure function of `(selection, force)` returning `ShutdownDecision` (data-model §2), leaving the HTTP/CLI mapping to the callers
-- [ ] T009 Move the sequence from `src/cuemspowerbridge/bridge.py:508-644` into `run_cluster_shutdown()` in `src/cuemspowerbridge/cluster_shutdown.py` — steps, order, timeouts and log lines unchanged; state reported through `progress` instead of `_set_state`
+- [ ] T009 Move the two **stage bodies** out of `src/cuemspowerbridge/bridge.py:508-644` into `run_display_stage()` and `run_node_stage(..., pre_pass: bool)` in `src/cuemspowerbridge/cluster_shutdown.py` — timeouts and log lines unchanged, state reported through `progress` instead of `_set_state`. **The relay pre-check, the mains-cut arming and the local power-off do NOT move**: they stay in `bridge.py`, because the HTTP route ends by triggering the transition that runs the other caller and a shared sequence would arm the relay twice per shutdown (FR-001a)
+- [ ] T009c Implement `pre_pass=True` in `run_node_stage()` — the transition path's single liveness probe (`max_wait_s=0`, `confirm_failures=1`, the reachability logger silenced for that call only) after which **only machines that answered alive** are SSHed; the HTTP route passes `pre_pass=False` and keeps its concurrent orchestration (FR-003a)
 - [ ] T009a Preserve the display-stage gate in `src/cuemspowerbridge/cluster_shutdown.py`: `projector_power_off_on_shutdown=false` reports "leaving displays alone" and returns success without touching a device; keep the existing "no displays configured" and "fleet unreachable" branches verbatim (FR-023, inventory §2.1)
 - [ ] T009b [P] Test all three display-stage gates in `tests/test_cluster_shutdown.py`, including that a closed gate exits 0 through the CLI and does not mark the run degraded
 - [ ] T010 Add self-exclusion to `src/cuemspowerbridge/cluster_shutdown.py` per [data-model.md](./data-model.md) §5 — uuid via `NodeView.is_self`, then **exact** address-set membership (never a substring test), then hostname/FQDN — with the duplicate-entry reason recorded in a comment (FR-019)
@@ -81,13 +92,13 @@ Baseline: **185 passed** (feature 001).
 - [ ] T010b [P] Assert the release point in `tests/test_cluster_shutdown.py`: the lock is free by the time the local power-off is issued, and a re-entrant acquisition succeeds while the sequence is finishing
 - [ ] T010c Pin one shared SSH host-key store in `src/cuemspowerbridge/node_executor.py`: `-o UserKnownHostsFile=/var/lib/cuems/.ssh/known_hosts` for every fan-out, so the daemon (as `cuems`) and the transition (as root) stop keeping separate stores; `StrictHostKeyChecking=accept-new` unchanged (FR-024, research R10, inventory §5.2)
 - [ ] T010d [P] Test in `tests/test_node_executor.py` that the pinned store appears in the argv of every SSH invocation and that a missing file is tolerated (first contact still accepted)
-- [ ] T011 Rewrite `handle_shutdown` in `src/cuemspowerbridge/bridge.py` as a thin caller: token, engine guard, **the new lock**, topology read, shared decision, `run_cluster_shutdown`, map `ShutdownOutcome` to HTTP and `/status`
+- [ ] T011 Rewrite `handle_shutdown` in `src/cuemspowerbridge/bridge.py` as a thin caller: token, engine guard, **the new lock**, topology read, shared decision, then its **own** orchestration — the two stage bodies concurrently, then the relay pre-check and arming, then the local power-off — mapping `StageOutcome`s to HTTP and `/status`
 - [ ] T012 [P] Test the sequence in isolation in `tests/test_cluster_shutdown.py`: both stages, the partial-resolution marker, the reachability policies (FR-020), and self-exclusion including the duplicate-entry case
 - [ ] T012a [P] Assert the two carried-over defects are not reproduced, in `tests/test_cluster_shutdown.py`: the self uuid comes from `NodeView.is_self` and **not** from any private read of `settings.xml` (FR-017), and a topology failure raises rather than degrading to "no self entry" the way the old `own_uuid()` swallow did (FR-018)
-- [ ] T013 Implement `src/cuemspowerbridge/scripts/cluster_poweroff.py` per [contracts/cli.md](./contracts/cli.md) — `--stage {displays,nodes,all}`, `--node-wait`, `--projector-timeout`, `--force`, `--dry-run`, `--transition`, `--lock-held`, `-v`; module docstring carrying the usage synopsis, **the `sudo` requirement for manual runs** and the exit-status contract; `argparse` with `prog=`; `main()` (match `scripts/test_projector.py`)
-- [ ] T014 Implement the exit-code mapping in `src/cuemspowerbridge/scripts/cluster_poweroff.py`: 0 complete · 1 usage · 3 precondition (including "cannot take the lock — run this with sudo") · 4 refused · 5 stuck hosts; line-oriented unbuffered stdout; `--stage all` takes the lock once for both stages and applies each stage's own bound (contracts/cli.md)
+- [ ] T013 Implement `src/cuemspowerbridge/scripts/cluster_poweroff.py` per [contracts/cli.md](./contracts/cli.md) — `--stage {displays,nodes}`, `--node-wait`, `--projector-timeout`, `--include-unadopted`, `--dry-run`, `--pre-pass`, `--lock-held`, `--refuse-if-running`, `--while-playing`, `-v`. **No `--force`**: the wrapper already uses that word for "run outside a poweroff transaction" and the HTTP route for "ignore a running project, include unadopted machines". Module docstring carries the synopsis, the exit-status contract and the statement that this is an internal helper with no `PATH` command; `argparse` with `prog=`; `main()` (match `scripts/test_projector.py`)
+- [ ] T014 Implement the exit-code mapping in `src/cuemspowerbridge/scripts/cluster_poweroff.py`: 0 complete · 1 usage · 3 precondition (including "cannot take the lock") · 4 refused · 5 stuck hosts; line-oriented unbuffered stdout; `--stage all` takes the lock once for both stages and applies each stage's own bound (contracts/cli.md)
 - [ ] T015 [P] Implement `src/cuemspowerbridge/scripts/config_get.py` — `--get <key>`, one bare value on stdout, exit 3 on unknown key or unreadable config; the key is the argument, never the value (FR-016, research R5)
-- [ ] T016 [P] Add both console entries to `pyproject.toml` `[tool.poetry.scripts]`, the two POSIX-sh shims in `data/bin/` that `exec` the venv entries, and their `debian/cuems-power-bridge.install` lines
+- [ ] T016 [P] Add **one** console entry to `pyproject.toml` `[tool.poetry.scripts]` — `cuems-power-bridge-config` — with its POSIX-sh shim in `data/bin/` and its `debian/cuems-power-bridge.install` line. The power-off helper gets **no** console entry and **no** shim: it is reached as `python -m cuemspowerbridge.scripts.cluster_poweroff` through the interpreter `cluster-poweroff.conf` names (FR-007, research R4a)
 
 **Checkpoint**: one sequence, two callers, both on `PATH`; suite green.
 
@@ -101,10 +112,11 @@ situations, and say the same things.
 **Independent Test**: drive every fixture through both entry points and compare decisions
 field by field.
 
-- [ ] T017 [P] [US1] Add `tests/test_shutdown_equivalence.py`: parameterise over `tests/fixtures/network_map/*` and assert the HTTP route and the CLI produce the same `ShutdownDecision` — case, targets, refusal token, partial flag
+- [ ] T017 [P] [US1] Add `tests/test_shutdown_equivalence.py`: parameterise over `tests/fixtures/network_map/*` and assert the HTTP route and the helper produce the same `ShutdownDecision` — case, targets, refusal token, partial flag. **Selection and stage semantics are what must match; orchestration deliberately differs** (FR-002)
 - [ ] T018 [P] [US1] Assert in `tests/test_shutdown_equivalence.py` that each refusal maps consistently across transports: `no_adopted_nodes` → 409/exit 4, `no_resolvable_nodes` → 409/exit 4, `topology_unreadable` → 503/exit 4
 - [ ] T019 [P] [US1] Assert in `tests/test_shutdown_equivalence.py` that a proceeding run reaches the same steps in the same order through both callers (progress events compared, not just the outcome)
-- [ ] T020 [US1] Assert the guard is **unreachable from the sequence** in `tests/test_shutdown_equivalence.py`: `src/cuemspowerbridge/cluster_shutdown.py` references neither the engine nor `/status`; the running-show probe exists only in `scripts/cluster_poweroff.py` (SC-010 — a claim about reachability, so a source-level assertion is the right instrument)
+- [ ] T019a [P] [US1] Assert in `tests/test_cluster_shutdown.py` that the shared module contains **no** reference to the relay, to a local power-off command, or to `arming-shelly`/`poweroff-issued` events — they belong to the HTTP route alone (FR-001a)
+- [ ] T020 [US1] Assert the guard is **unreachable from the stage bodies** in `tests/test_shutdown_equivalence.py`: `src/cuemspowerbridge/cluster_shutdown.py` references neither the engine nor `/status`; the running-show probe exists only in `scripts/cluster_poweroff.py` (SC-010 — a claim about reachability, so a source-level assertion is the right instrument)
 - [ ] T021 [US1] Diff `run_cluster_shutdown` against `specs/002-cluster-poweroff-cli/evidence/sequence-before.txt` and record the review in `specs/002-cluster-poweroff-cli/evidence/extraction-diff.md`, justifying every line that is not a pure move
 - [ ] T022 [US1] Verify no existing HTTP behaviour changed: reason tokens, status codes and `/status` keys are as feature 001 left them (`tests/test_shutdown_cases.py` must pass untouched)
 - [ ] T023 [US1] Take the lock in both callers and assert cross-process exclusion in `tests/test_shutdown_equivalence.py`: whichever holds it, the other refuses (`409` / exit 4) and never queues; and a run given `--lock-held` does **not** acquire it (FR-014, SC-009)
@@ -123,10 +135,12 @@ package holds none of it.
 for this package's name and find nothing.
 
 - [ ] T024 [P] [US2] Extend `tests/test_cluster_shutdown.py` to cover the display stage end to end — configured fleet, no fleet, an unreachable fleet — without hardware
-- [ ] T025 [US2] Delete the two Python heredocs from `../cuems-common/usr/bin/cuems-cluster-poweroff` and call `cuems-power-bridge-cluster-poweroff --stage displays|nodes` with the conffile's values passed as arguments, plus `--transition --lock-held`
+- [ ] T025 [US2] Delete the two Python heredocs from `../cuems-common/usr/bin/cuems-cluster-poweroff` and call `"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff --stage displays|nodes` with the conffile's values as arguments, plus `--pre-pass --lock-held`; keep each call inside its existing `timeout` and its `| while read … log` pipe
 - [ ] T025a [US2] Take the sequence lock **in the wrapper**, spanning both stages: `exec 9>/run/cuems-power-bridge/shutdown.lock; flock -n 9 || { log …; exit 4; }` in `../cuems-common/usr/bin/cuems-cluster-poweroff`, so no other power-off can start in the gap between them (research R2a — this is the analysis C1 fix, and the gap it closes is on the product path)
-- [ ] T026 [US2] Keep the wrapper's own responsibilities in `../cuems-common/usr/bin/cuems-cluster-poweroff` (research R8): the poweroff-vs-reboot `systemctl list-jobs` check, `enabled=`, the per-stage `timeout` bounds, the ordering probe — and switch its "is the bridge installed?" probe from the venv interpreter to `command -v cuems-power-bridge-cluster-poweroff`
-- [ ] T026a [US2] Mark `venv_python` in `../cuems-common/etc/cuems/cluster-poweroff.conf` as retained-but-unused, with the reason: after T026 the probe is `command -v`, so the key is no longer consulted. It is a conffile, so it cannot simply vanish — but a key that lies is how an operator is misled during an incident (inventory §2.3, analysis F2). `bridge_url` stays: `cuems-displays-on` still uses it
+- [ ] T026 [US2] Keep every one of the wrapper's own responsibilities verbatim (research R0): the `enabled=` kill switch, the poweroff-vs-reboot `systemctl list-jobs` check with its unknown-means-skip default, the `timeout 10s systemctl stop cuems-displays-on.service`, the ordering probe on every path, the `nodes_off=false` early return, the per-stage `timeout` bounds — **and the `[ ! -x "$venv_python" ]` guard exactly as written**, which keeps working unchanged because the helper is invoked through that same interpreter
+- [ ] T026b [US2] Preserve the wrapper's exit discipline in `../cuems-common/usr/bin/cuems-cluster-poweroff`: translate every helper exit status into a log line and **still `exit 0` on every path that runs during a transaction**, stage 1 failing still continuing to stage 2 (FR-009a). A refused **manual** (`--force`) run may exit non-zero
+- [ ] T026c [US2] Add the running-show guard to the wrapper's **manual path only**: `--force` passes `--refuse-if-running` to the helper, and a new wrapper option (e.g. `--while-playing`) passes the override through. A power-off transaction passes neither, so the guard is unreachable from the product path (FR-015, FR-015c)
+- [ ] T026a [US2] Confirm `venv_python` in `../cuems-common/etc/cuems/cluster-poweroff.conf` stays **live** configuration — the helper is invoked through it, so both the override and the missing-package guard keep working. The dead-key problem the earlier draft would have created does not arise (research R4a supersedes analysis F2)
 - [ ] T027 [US2] Replace the two Python one-liners in `../cuems-common/usr/bin/cuems-displays-on` with `cuems-power-bridge-config --get`, leaving its polling loop, retry knobs and `curl` usage untouched (FR-016)
 - [ ] T028 [P] [US2] Assert in `tests/test_sibling_decoupling.py` that neither sibling script mentions `cuemspowerbridge` (a repository-local check of the sibling checkout, skipped when it is absent)
 - [ ] T028a [US2] Fix the stale header of `../cuems-common/etc/sudoers.d/99-cuems-poweroff` — it describes node-side `cuems` users receiving the bridge's SSH, but the target has been `cuems-admin` since the hardening (inventory §9, analysis D2)
@@ -144,13 +158,13 @@ for this package's name and find nothing.
 
 **Independent Test**: run it from a plain shell, ask for help, rehearse a power-off.
 
-- [ ] T031 [P] [US3] Implement the running-show guard in `src/cuemspowerbridge/scripts/cluster_poweroff.py` as a `GET /status` probe of the local daemon; refuse with exit 4 unless `--force`; skip entirely under `--transition` or when the daemon is unreachable (FR-015, research R3)
-- [ ] T032 [P] [US3] Test the guard's truth table in `tests/test_cli_poweroff.py` — daemon up/playing, up/idle, unreachable, and `--transition` — asserting the transition case never probes
+- [ ] T031 [P] [US3] Implement the running-show guard in `src/cuemspowerbridge/scripts/cluster_poweroff.py`: **only when `--refuse-if-running` is passed**, probe `GET /status` and refuse with exit 4 when `engine_state == "running"`, naming the project; `--while-playing` proceeds and logs that the override was used. Fail open — unreachable daemon, `engine_state == "unknown"`, or a `dry_run` all proceed with a WARNING (FR-015, FR-015b, research R3)
+- [ ] T032 [P] [US3] Test the guard's full truth table in `tests/test_cli_poweroff.py` — not requested (never probes), requested with playing/idle/unknown/unreachable, `--while-playing`, and `dry_run` — asserting that a run without `--refuse-if-running` performs no HTTP call at all
 - [ ] T033 [P] [US3] Test the exit codes and `--dry-run` in `tests/test_cli_poweroff.py`: every refusal yields 4, a stuck host yields 5, a clean rehearsal yields 0 and touches nothing
-- [ ] T034 [US3] Document both tools in `README.md`: synopsis, every option, the exit-status table, the `--transition` flag's meaning, and the rehearsal workflow
+- [ ] T034 [US3] Document in `README.md`: `cuems-power-bridge-config`, and — for the power-off helper — that it is an **internal** module invoked by the platform wrapper, that the operator command remains `cuems-cluster-poweroff [--force]`, and what the manual guard and its override do. No operator synopsis for the helper: there is deliberately no command to type
 - [ ] T035 [P] [US3] Update `CLAUDE.md` — the new tools, the lock, and the fact that `cuems-common` no longer imports this package
 - [ ] T035a [P] [US3] Assert in `tests/test_cluster_shutdown.py` that the sequence reads no identity-dependent path directly — no `~`, no `$HOME`, no hard-coded `/root` or `/var/lib/cuems` — so it behaves the same as root under the transition and as `cuems` inside the daemon (FR-013); and add a line to `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` §8 recording which `known_hosts` each of the two real runs used
-- [ ] T036 [P] [US3] Verify `data/bin/cuems-power-bridge-cluster-poweroff` and `data/bin/cuems-power-bridge-config` work from a plain `PATH` on an installed system; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt` alongside T042
+- [ ] T036 [P] [US3] Verify on an installed system that `data/bin/cuems-power-bridge-config` works from a plain `PATH`, that **no** power-off command was added to `PATH`, and that `"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff --help` runs; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt` alongside T042
 
 ---
 
@@ -171,7 +185,7 @@ for this package's name and find nothing.
 ## Phase 7: Polish, evidence and the coordinated candidate
 
 - [ ] T041 [P] Add the `debian/changelog` entry for this feature **inside the open `0.3.1-1` entry** — no new version; it lands beside feature 001
-- [ ] T042 Build and check the package: the two shims land in `usr/bin/`, the tmpfiles rule in `usr/lib/tmpfiles.d/`, and `dpkg-deb -c` still shows no `site-packages/cuemsutils`; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`
+- [ ] T042 Build and check the package: the **config** shim lands in `usr/bin/` and no power-off command does, the tmpfiles rule lands in `usr/lib/tmpfiles.d/`, and `dpkg-deb -c` still shows no `site-packages/cuemsutils`; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`
 - [ ] T043 Run the full suite and record the final count in `specs/002-cluster-poweroff-cli/evidence/final-suite.txt`
 - [ ] T044 [P] Update `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` if implementation changed any check's steps; every box stays unchecked until actually performed
 - [ ] T045 Merge `002-cluster-poweroff-cli` into `feat/xml-refactor` with `--no-ff` and push `feat/xml-refactor` (the feature branch itself stays local)

@@ -21,15 +21,24 @@ entry, and a `debian/cuems-power-bridge.install` line putting the shim on `PATH`
 ## `cuems-power-bridge-cluster-poweroff`
 
 ```
-sudo cuems-power-bridge-cluster-poweroff --stage {displays|nodes|all}
-         [--node-wait S] [--projector-timeout S]
-         [--force] [--dry-run] [--transition] [--lock-held] [-v]
+"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff \
+        --stage {displays|nodes} [--node-wait S] [--projector-timeout S]
+        [--include-unadopted] [--dry-run] [--pre-pass] [--lock-held]
+        [--refuse-if-running [--while-playing]] [-v]
 ```
 
-**Manual runs require `sudo`.** The sequence lock is `0770 cuems cuems`, and the operator
-account has its own primary group, so an unprivileged run cannot take it — and a power-off
-that cannot take the lock must fail, not proceed unlocked. Without privilege the tool exits 3
-saying exactly that. The help output and the module docstring say it too.
+**Internal helper — no `PATH` command.** It is invoked through the runtime environment's own
+interpreter, the one `cluster-poweroff.conf` names, so the configuration override and the
+missing-package guard both keep working and there remains exactly **one** operator command
+that powers the venue down: the platform package's `cuems-cluster-poweroff [--force]`.
+
+**It never** arms the mains-cut relay, pre-checks it, or powers this controller off. Those
+belong to `POST /shutdown`, which ends by triggering the transition that runs this tool — a
+shared sequence containing them would arm the relay twice per shutdown.
+
+**`--force` is deliberately not a flag here**: the wrapper already uses that word for *run
+outside a poweroff transaction*, and the HTTP route for *ignore a running project and include
+unadopted machines*.
 
 | Option | Meaning |
 |---|---|
@@ -38,7 +47,10 @@ saying exactly that. The help output and the module docstring say it too.
 | `--projector-timeout` | bound for the display stage, same reason. |
 | `--force` | power off every machine in the map, adopted or not, **and** override the running-show refusal. Same meaning as the API's `force=1`. |
 | `--dry-run` | run every branch, change nothing. Independent of the config file's own `dry_run`. |
-| `--transition` | declare that this run is the system's own power-off transition. **Suppresses the running-show probe** (there is no daemon to ask). The wrapper passes it; an operator does not. |
+| `--pre-pass` | run the transition path's single liveness probe (`max_wait_s=0`, one confirmation, poller silenced) and SSH **only** the machines that answered alive. The wrapper passes it; the HTTP route does not. |
+| `--include-unadopted` | target every machine in the map, not only the adopted ones — the selection half of what `force=1` means on the HTTP route. |
+| `--refuse-if-running` | **request** the running-show guard. The wrapper passes it only on its manual (`--force`) path; a power-off transaction passes nothing, so the guard is unreachable from the product path. |
+| `--while-playing` | with `--refuse-if-running`, proceed anyway and record in the log that the override was used. Per-run, never a configuration key. |
 | `--lock-held` | declare that the **caller** holds the sequence lock, so this invocation must not take it. Passed **only** by the wrapper, which holds one lock across both stages (see **Lock**). Passing it without holding the lock is a caller bug, and the tool says so in its help. |
 | `-v` | DEBUG on stdout. |
 
@@ -52,9 +64,12 @@ saying exactly that. The help output and the module docstring say it too.
 | 4 | **refused**: topology unreadable · nothing adopted · nothing addressable · a project is playing (manual only) · another power-off holds the lock | error, loud |
 | 5 | ran, but some machine never went quiet | warning |
 
-`0` and `5` mean the sequence ran; `3` and `4` mean it did not. Neither `4` nor `5` aborts
-the poweroff transaction — by then the machine is going down regardless, and the wrapper's
-job is to make the reason legible afterwards.
+`0` and `5` mean the stage ran; `3` and `4` mean it did not.
+
+**The wrapper translates every status into a log line and still exits 0** on any path that runs
+during a power-off transaction — an `ExecStop` that fails must never fail the stop it belongs
+to, and stage 1 failing still continues to stage 2. A refused **manual** run may exit non-zero:
+no transition is in progress and an operator should see a failure.
 
 ### Configuration gates the tool still obeys
 

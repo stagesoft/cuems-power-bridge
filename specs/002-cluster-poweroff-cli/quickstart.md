@@ -87,11 +87,13 @@ cuems-power-bridge-cluster-poweroff --stage nodes --dry-run   # exit 4, names th
 
 | Setup | Expect |
 |---|---|
-| daemon up, project playing, no `--force` | exit 4, message names the project |
-| daemon up, project playing, `--force` | proceeds |
-| daemon up, nothing playing | proceeds, no flag needed |
-| daemon down | proceeds (probe fails, no guard) |
-| `--transition` | probe never runs, whatever the daemon says |
+| guard **not requested** (any transition) | probe never runs, whatever the daemon says |
+| requested, daemon up, project playing | exit 4, message names the project |
+| requested, project playing, `--while-playing` | proceeds, and the log records the override |
+| requested, nothing playing | proceeds |
+| requested, daemon unreachable | proceeds with a WARNING |
+| requested, engine state unknown | proceeds with a WARNING (the recovery case) |
+| requested, `dry_run` | guard skipped entirely |
 
 ---
 

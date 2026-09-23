@@ -12,21 +12,35 @@ daemon so two callers can run it, plus the small values that cross the new bound
 
 ---
 
-## 1. `ShutdownContext` — what the sequence needs, and nothing more
+## 1. `StageContext` — what the STAGES need, and nothing more
 
-The sequence today reads six things off `Bridge`. Extracted, it takes them explicitly, which
-is what makes it testable and what stops the CLI from dragging the daemon's WebSocket clients
-into a process that has no use for them.
+What is shared is not a sequence but **two stage bodies plus the selection**. The relay and the
+local power-off are not here and cannot be reached from here (FR-001a): the HTTP route owns
+them, and that route *ends by triggering the transition that runs the other caller*, so a
+shared sequence containing them would arm the relay twice per shutdown.
 
-| Field | Type | Why the sequence needs it |
+| Field | Type | Why the stages need it |
 |---|---|---|
-| `cfg` | `Config` | ssh user/key, poweroff commands, timeouts, Shelly timer, `dry_run` |
-| `displays` | `DisplayManager` | stage 1, and the parallel power-off in stage 2 |
-| `shelly` | `ShellyClient` | the pre-check and the mains-cut arming |
-| `progress` | `Callable[[str, dict], None]` | state transitions reported OUT; the daemon maps them to `_set_state` and `/status`, the CLI to stdout lines. The event vocabulary is fixed (§1a) so the two callers can be compared event-for-event |
+| `cfg` | `Config` | ssh user/key, poweroff command, per-stage timeouts, `dry_run`, `projector_power_off_on_shutdown`, the `projector.N.*` fleet |
+| `displays` | `DisplayManager` | the display stage |
+| `progress` | `Callable[[str, dict], None]` | reported OUT; the daemon maps events to `_set_state` and `/status`, the CLI to stdout lines. Fixed vocabulary (§1a) |
 
-**Not in the context, deliberately**: `engine` (the sequence never consults it — the running
--show guard is the caller's business, R3), `editor`, the auto-load state, the HTTP app.
+**Not here, deliberately**: `shelly` (FR-001a), the local power-off command, `engine` (the
+running-show guard is the *caller's* business and is requested, not inferred — R3), `editor`,
+the auto-load state, the HTTP app.
+
+### 1b. The two shared entry points
+
+```
+run_display_stage(ctx, *, progress)                    -> StageOutcome
+run_node_stage(ctx, decision, *, pre_pass, progress)   -> StageOutcome
+```
+
+`pre_pass` is the transition path's single liveness probe (`max_wait_s=0`, one confirmation,
+the poller's logger silenced) after which **only machines that answered alive** are SSHed. The
+HTTP route passes `pre_pass=False` and keeps its concurrent orchestration. Callers order the
+stages themselves: concurrent for the HTTP route, displays-then-machines for the transition,
+because the machines feed the projectors.
 
 ### 1a. `progress` events — the fixed vocabulary
 
@@ -42,8 +56,11 @@ expose:
 | `nothing-to-poll` | `{reason}` | Case 1 — stated, never silent |
 | `displays` | `{before, after}` | display stage outcome |
 | `arming-shelly` | `{seconds}` | before the mains-cut timer is armed |
-| `poweroff-issued` | `{command}` | the local power-off (or its dry-run equivalent) |
-| `done` | `{stuck_hosts, timed_out}` | terminal |
+| `done` | `{stuck_hosts, timed_out}` | terminal, per stage |
+
+Two events that existed in the first draft — `arming-shelly` and `poweroff-issued` — are
+**not** stage events. They belong to the HTTP route's own orchestration and stay in
+`bridge.py` (FR-001a).
 
 **Both callers must observe the same events in the same order for the same inputs** — that is
 what T019 asserts. A new event is a change to this table, not an implementation detail.
@@ -106,6 +123,21 @@ Neither derives anything the sequence did not state.
 | On holder death | released by the kernel — no stale-lock handling, which is how lock files usually become their own outage |
 | **Released before the local power-off** | the daemon drops the lock **explicitly** just before running its power-off command, because that command re-enters this same sequence through the system transition (research R2a-i). By then every irreversible step is done and stage 1 is idempotent, so the re-entry is a fast no-op rather than a refusal |
 | Path is injectable | the lock location is a parameter defaulting to the runtime path, so the suite can point it at a temporary directory instead of depending on `/run` existing on the developer's machine (analysis H2) |
+
+---
+
+## 3a. Invocation — the tool is internal
+
+The wrapper calls `"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff …`. This package
+ships **no** `PATH` command for it (FR-007), which keeps the conffile's interpreter override
+working, keeps the missing-package guard exactly as written, and leaves exactly one operator
+command that powers the venue down. `cuems-power-bridge-config` does ship a shim: it is a
+read-only query `cuems-displays-on` needs, and it powers nothing off.
+
+**Flag names avoid `--force`**, which already means *run outside a poweroff transaction* in the
+wrapper and *ignore a running project, include unadopted machines* on the HTTP route. The CLI
+spells its own: `--include-unadopted`, `--refuse-if-running`, `--while-playing`, `--dry-run`,
+`--lock-held`, `--stage`.
 
 ---
 
