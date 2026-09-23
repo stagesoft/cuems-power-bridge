@@ -56,6 +56,7 @@ Returned by both selection functions so callers never have to infer why a list i
 | Field | Type | Meaning |
 |---|---|---|
 | `mode` | `"adopted" \| "forced_all" \| "controller_only"` | which policy produced this answer |
+| `partial` | `bool` | some machine that should have been targeted is unresolvable (FR-025) |
 | `targets` | `list[str]` (avahi names) or `list[tuple[str, str]]` (ip, label) | what to act on |
 | `found` | `int` | non-self machines present in the document |
 | `adopted_count` | `int` | of those, adopted |
@@ -97,13 +98,16 @@ irreversible step, plus a `selection_mode` detail carried through the run:
 ```
 checking ──(TopologyError)────────────► idle   reason=topology_unreadable      [Case 5]
 checking ──(found>0, adopted=0, !force)► idle   reason=no_adopted_nodes         [Case 3]
+checking ──(targetable>0, addressable=0)► idle  reason=no_resolvable_nodes      [Case 3b]
 checking ──(found=0)──────────────────► …      selection_mode=controller_only  [Case 1]
 checking ──(adopted>0, !force)────────► …      selection_mode=adopted          [Case 2]
 checking ──(force)────────────────────► …      selection_mode=forced_all       [Case 4]
 ```
 
-Both refusals occur **before** SSH fan-out, before the reachability poll and before
-`arming-shelly` — no partially executed shutdown, and mains is never armed.
+All three refusals occur **before** SSH fan-out, before the reachability poll and before
+`arming-shelly` — no partially executed shutdown, and mains is never armed. A **partial**
+selection (some addressable, some not) is not a refusal: it proceeds with `partial=True`,
+each unresolvable machine logged at ERROR.
 
 `polling` is entered whenever `targets` is non-empty (Cases 2 and 4), including when the
 list is shorter than `found`. In Case 1 there is nothing to poll: the log states this
@@ -119,6 +123,8 @@ explicitly rather than leaving silence to be read as success.
 | `avahi` never derives from `ip`; unresolvable machines are reported, not dropped | FR-005 |
 | Readiness peers are identified by `ip`, adopted only, and machines without `ip` are skipped with a warning | FR-006, FR-009 |
 | Absent `adopted` ⇒ not adopted | R3, FR-008 |
+| Zero addressable targets ⇒ refusal, not an empty proceed; some addressable ⇒ proceed with `partial=True` | FR-010 (Case 3b), FR-025 |
+| Every error message names the document/machine at fault and a remedy | FR-026 |
 | A topology failure raises `TopologyError`; it never becomes an empty `Selection` | FR-003, FR-004 |
 | `force` flips `include_unadopted`; it cannot suppress `TopologyError` | FR-011 |
 | Fixtures and live documents must satisfy the owning schema | FR-020, Case 5 |

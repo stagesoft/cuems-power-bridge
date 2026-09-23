@@ -21,10 +21,11 @@ disabled (orderly cluster power-off; the boot readiness gate), each verified sep
 Around that, the feature makes "nothing selected" impossible to confuse with "nothing to
 do": the adapter returns a `Selection` that carries its own reasons, topology failures
 raise a classified `TopologyError` instead of yielding an empty list, and the shutdown
-handler implements the spec's five normative cases — controller-only proceeds; adopted-only
-by default; refuse when the document lists machines but none is adopted; `force` targets
-everything; a failed read refuses even under `force`, because *force overrides policy,
-never evidence*.
+handler implements the spec's six normative cases — controller-only proceeds; adopted-only
+by default; refuse when the document lists machines but none is adopted; refuse when none of
+the machines to target is addressable; `force` targets everything; a failed read refuses even
+under `force`, because *force overrides policy, never evidence*. A partial selection (some
+addressable, some not) proceeds, loudly and distinguishably.
 
 The boundary with `cuems-common`'s `cuems-cluster-poweroff` is broken deliberately rather
 than aliased, and the break is enforced by `Breaks:` in both directions so a half-upgrade is
@@ -71,7 +72,7 @@ feature touches 4 source modules, the test suite, both packaging files and the R
 
 | Principle | Bears on this feature | How it is satisfied | Verified by |
 |---|---|---|---|
-| **I — it cuts mains power; an empty step is not a successful step** | **Centrally.** The defect is exactly this. | `Selection` carries `found`/`adopted`/`skipped` so an empty answer always states its reason; Case 3 refuses; Case 5 refuses even under `force`; `/status.node_selection` exposes it without triggering a shutdown. Fail-safe unchanged: a failed Shelly RPC still means no local poweroff. | spec Cases 1–5; contracts/http-shutdown.md; quickstart §3 |
+| **I — it cuts mains power; an empty step is not a successful step** | **Centrally.** The defect is exactly this. | `Selection` carries `found`/`adopted`/`skipped`/`partial` so an empty **or short** answer always states its reason; Cases 3 and 3b refuse; Case 5 refuses even under `force`; a partial selection proceeds but is marked; `/status.node_selection` exposes all of it without triggering a shutdown. Fail-safe unchanged: a failed Shelly RPC still means no local poweroff. | spec Cases 1–5 + 3b; contracts/http-shutdown.md; quickstart §3 |
 | **II — ordered, partially irreversible; verification runs on the anomalous path** | **Yes.** `bridge.py:431`'s `if resolved:` is the constitution's named counter-example. | The reachability poll runs whenever a shutdown proceeds with targets, including a short list; Case 1's "no targets, nothing to poll" is stated in the log, not implied by silence; both refusals terminate before SSH, before the poll and before `arming-shelly`. | data-model.md §3; quickstart §3 |
 | **III — it reads a schema it does not own** | **Centrally.** | The private ElementTree parser is deleted; topology comes from `ConfigManager`; `NodeRole` is imported, never redeclared; `cuemsutils.xml` is not imported (Q14). | research R2/R4; data-model.md §1 |
 | **IV — designed degraded paths need real triggers** | **Yes.** The single-controller branch is the counterfeited path. | `TopologyError` and an empty `Selection` are mutually exclusive outcomes; the settle path is entered only after a successful read; the two resolution policies (avahi ignores `<ip>`; readiness trusts it) are preserved and covered by tests. | data-model.md §2.3; quickstart §2 |
@@ -103,7 +104,7 @@ specs/001-node-role-parser/
 │   └── venv-library-surface.md  # what cuems-common drives (changed, under cutover)
 ├── checklists/
 │   └── requirements.md  # spec quality checklist (all items pass)
-├── fixtures/            # created during implementation — schema-valid maps per case
+│                        #   (fixtures live in tests/fixtures/network_map/, not here)
 ├── evidence/            # created during implementation — recorded runs (FR-021/22/23)
 └── tasks.md             # /speckit-tasks output — NOT created by /speckit-plan
 ```
@@ -126,6 +127,7 @@ src/cuemspowerbridge/
 └── displays/            # unchanged (surface frozen)
 
 tests/
+├── fixtures/network_map/     # NEW: schema-valid fixture dirs, one per case
 ├── test_network_map_ips.py   # fixtures rewritten schema-valid, both vocabularies
 ├── test_autoload.py          # readiness-gate half of the recovery
 ├── test_shutdown_cases.py    # NEW: the five cases, adopted/unadopted, refusal codes
@@ -145,8 +147,9 @@ delete a parallel implementation rather than to grow one.
 
 ## Implementation phases
 
-Ordering is derived from the dependency edges, not from file convenience. `/speckit-tasks`
-will expand each into tasks.
+Ordering is derived from the dependency edges, not from file convenience. Phases A–F below
+map one-to-one onto [tasks.md](./tasks.md)'s numbered phases: **A→1, B→2, C→3+4, D→5 (this
+repository's half), E→5 (the sibling half), F→6+7**.
 
 **Phase A — evidence that cannot be produced later (first, before any code change)**
 Capture the pre-migration failing run (quickstart §1) into `evidence/`. Once the parser is
@@ -198,7 +201,7 @@ published artifact (user, 2026-09-23):
 |---|---|---|
 | `cuems-utils` | `0.1.0rc16` — ships `/etc/cuems/settings.xml` | unreleased, `feat/xml-refactor` |
 | `cuems-common` | `1.3.0-23` (**UNRELEASED** in its changelog) — the fixed `cuems-cluster-poweroff` lands in this same entry | unreleased, `feat/xml-refactor` |
-| this package | proposed `0.3.1-1` | this feature |
+| this package | **`0.3.1-1`** (settled 2026-09-23) | this feature |
 
 - Independent of every other 010 flow: nothing here needs them and they do not need this.
 - **Must** land simultaneously with `cuems-common`'s half (Phase E), expressed by the

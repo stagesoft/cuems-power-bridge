@@ -53,6 +53,10 @@ Neither produces an error, a warning, or a failed test.
   **A:** Yes. Shutdown targets adopted machines only — **unless `force` is set, which
   means "power off every machine in the system"**. (See **Shutdown target selection**,
   Cases 2–4, and **The `force` flag**.)
+- **Q4 — Does the adoption filter also apply to the boot readiness gate?**
+  **A: Confirmed — yes, as stated.** The gate waits for adopted machines only. No `force`
+  exists at boot, so an unadopted machine can never be waited for; it is named as skipped.
+  (See **Boot readiness gate and adoption**, **FR-009**.)
 
 ## Shutdown target selection *(normative — this section defines operator-visible behaviour)*
 
@@ -62,23 +66,46 @@ not only by an implementer.
 
 ### Vocabulary
 
+This section is written in operator terms. The equivalents used by the plan, the contracts
+and the code are: *machine* = node, *topology document* = `/etc/cuems/network_map.xml`,
+*host identity document* = `/etc/cuems/settings.xml`, *resolvable name* = the `.local`
+avahi name.
+
 | Term | Meaning |
 |---|---|
 | **self entry** | The entry in the topology document describing *this* controller, identified by this host's own identifier (from the host identity document), with address and name matching as corroboration. |
 | **other machine** | Any entry whose role is the non-controller role, excluding the self entry. |
 | **adopted machine** | An "other machine" whose entry is marked as adopted into this cluster. |
 | **unadopted machine** | An "other machine" present in the document but not marked adopted — a machine that has been seen but not taken into the cluster. |
+| **addressable machine** | A machine carrying at least one of `role_id`, `alias` or `hostname`, from which its `.local` name is built. A machine with none of the three is **unresolvable** and cannot be commanded off — its recorded address is never used as a substitute. |
 | **`force`** | The explicit override an operator (or the wall switch) sends with a shutdown request. See **The `force` flag**. |
 
-### The five cases
+### The six cases
 
 | # | Situation | What happens | Machines powered off |
 |---|---|---|---|
 | **1** | **Controller-only system.** The document is read successfully and contains only the self entry (no other machine at all). | **Shutdown proceeds normally.** This is a supported, ordinary configuration — not an anomaly and not an error. No machines are commanded off, so there is nothing to wait for; the mains-cut timer is armed and the controller powers off. The log and status say plainly that this is a controller-only system. | none (correctly) |
 | **2** | **Normal cluster.** The document is read successfully, other machines exist, and at least one is adopted. `force` not set. | **Shutdown proceeds.** Every **adopted** machine is commanded off and confirmed off the network before the mains-cut timer is armed. Unadopted machines are **not** targeted, and each one is named in the log as deliberately skipped. | adopted machines |
 | **3** | **Nothing adopted.** The document is read successfully and other machines exist, but **none** is adopted. `force` not set. | **Shutdown REFUSES.** Mains power is not cut. The refusal names the machines that were skipped, states that none is adopted, and states the remedy: adopt them, or repeat the request with `force`. Rationale: the document says this cluster has machines; powering off the controller and cutting mains while they run is exactly the field failure this feature exists to remove. | none — shutdown refused |
+| **3b** | **Nothing addressable.** The document is read successfully, adopted machines exist (or `force` is set and other machines exist), but **none of the machines to be targeted is addressable** — every one is missing `role_id`, `alias` and `hostname`. | **Shutdown REFUSES.** Mains power is not cut. The refusal names every unresolvable machine by identifier and states the remedy: give each one a name in the topology document. Rationale: the cluster has machines that cannot be reached, so powering off the controller would cut mains on machines nobody could command down. `force` does **not** override this — it is a reachability fact, not a policy. | none — shutdown refused |
 | **4** | **Forced shutdown.** `force` is set, and the document was read successfully. | **Shutdown proceeds and targets EVERY other machine — adopted or not.** `force` means "power off every machine in the system". It also retains its existing meaning of overriding the refusal to shut down while a project is running. | every other machine |
 | **5** | **The topology could not be read.** Any failure of the read: the document is in the retired vocabulary, is invalid against the schema, is missing, has an incomplete machine entry, the host identity document is missing, or this host has no entry in the document. | **Shutdown REFUSES, and `force` does NOT override this.** Mains power is not cut. The refusal names the document and the remedy. Rationale: **`force` overrides policy, never evidence.** A read that failed produced no knowledge of the cluster, so there is no basis on which to power anything off — including this controller, whose mains would be cut on machines nobody has accounted for. | none — shutdown refused |
+
+### Partial resolution — a short list still proceeds, loudly
+
+If **some** machines to be targeted are addressable and others are not, the shutdown
+**proceeds** with those it can reach. This is deliberate: refusing the whole shutdown
+because one machine lost its name would leave the venue powered on, which is worse. But it
+is never quiet:
+
+- each unresolvable machine is logged at ERROR by identifier;
+- the operator-visible status marks the selection as **partial**, distinctly from a
+  complete one, so a monitor can alert on it without triggering a shutdown;
+- the machines that could not be commanded off keep running when mains is cut, and that is
+  the outcome the ERROR exists to make visible before the next shutdown.
+
+Case 3b is the limit of this rule: when *none* is addressable, there is nothing to proceed
+with and the shutdown refuses.
 
 ### Why Case 1 and Case 5 are different
 
@@ -115,9 +142,16 @@ switch is the operator's last resort and must always be able to kill the venue.
 The boot readiness gate (which decides how long to wait before loading the show) waits for
 **adopted** machines that carry an address. Unadopted machines are not waited for: nothing
 can force them at boot, and a machine that is not in the cluster cannot be required to
-join it before the show loads. The single-controller settle path is taken **only** when the
-document was read successfully and lists no adopted machine with an address — never
-because a read failed.
+join it before the show loads. Each one is named as skipped (confirmed, Q4).
+
+The single-controller settle path distinguishes three states that must never collapse into
+one:
+
+| State | What the gate does |
+|---|---|
+| Read OK, **no adopted machine at all** | Takes the single-controller settle path, reported as such. The ordinary standalone configuration. |
+| Read OK, **adopted machines exist but none carries an address** | Takes the settle path **with a WARNING** naming every adopted machine it cannot wait for. This is a misconfigured topology document, not a standalone cluster, and it must not read as one. |
+| **Read failed** | Does **not** take the settle path. Auto-load does not proceed on an unknown topology; the failure is reported. |
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -238,9 +272,9 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
 
 ### Edge Cases
 
-- **A machine that cannot be named**: a machine whose entry carries none of the resolvable
-  names is reported as unresolvable, never silently dropped, and never addressed by its raw
-  address.
+- **A machine that cannot be named**: reported as unresolvable at ERROR, never silently
+  dropped, and never addressed by its raw address. Some unresolvable ⇒ the shutdown
+  proceeds, marked partial; **all** unresolvable ⇒ Case 3b, refused.
 - **A machine with no address**: for the readiness gate only, such a machine is skipped
   with a warning; it remains a shutdown target if it is adopted (or if `force` is set).
 - **The controller's own entry**: the controller must never command itself off over the
@@ -287,7 +321,7 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
 - **FR-008**: Shutdown MUST target **adopted** machines only, except under `force`
   (FR-011). Each unadopted machine skipped MUST be named in the log.
 - **FR-009**: The boot readiness gate MUST wait for **adopted** machines with an address
-  only, and MUST name any machine it skips.
+  only (confirmed, Q4), and MUST name any machine it skips, with its reason.
 
 **Not mistaking nothing for success**
 
@@ -297,22 +331,37 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
   - Case 2 (adopted machines exist, no `force`) — proceed, targeting adopted machines.
   - Case 3 (other machines exist, none adopted, no `force`) — **refuse**; do not arm
     mains-cut; name the skipped machines and the remedy.
+  - Case 3b (machines would be targeted but none is addressable) — **refuse**, regardless
+    of `force`; do not arm mains-cut; name every unresolvable machine and the remedy.
   - Case 4 (`force`) — proceed, targeting every other machine.
   - Case 5 (topology read failed) — **refuse**, regardless of `force`; do not arm
     mains-cut; name the document and the remedy.
 - **FR-011**: `force` MUST override (a) the refusal to shut down while a project is
-  running and (b) the adoption filter. It MUST NOT override a failed topology read.
+  running and (b) the adoption filter. It MUST NOT override a failed topology read
+  (Case 5) or a wholly unaddressable target set (Case 3b): *force overrides policy, never
+  evidence*.
 - **FR-012**: The step that confirms machines have gone quiet MUST run whenever a shutdown
   proceeds with one or more targets — it MUST NOT be skipped because the selection was
   empty or short. In Case 1 there are no targets and no wait, which MUST be stated in the
   log rather than implied by silence.
 - **FR-013**: The boot readiness gate MUST enter its single-controller settle path only
-  after a successful read that lists no adopted machine with an address.
+  after a successful read, and MUST distinguish the three states in **Boot readiness gate
+  and adoption**: no adopted machine at all (settle, reported as standalone); adopted
+  machines present but none with an address (settle **with a WARNING** naming them); read
+  failed (do not settle, report).
 - **FR-014**: Operator-visible status MUST expose enough state to distinguish, without
-  reading the log: a normal cluster shutdown, a controller-only shutdown, a refusal for
-  lack of adopted machines, a refusal for a failed read, and a forced shutdown. It MUST
-  also expose how many machines were found, how many were adopted, and how many were
-  targeted.
+  reading the log: a normal cluster shutdown, a controller-only shutdown, a **partial**
+  selection, a refusal for lack of adopted machines, a refusal for lack of addressable
+  machines, a refusal for a failed read, and a forced shutdown. It MUST also expose how
+  many machines were found, how many were adopted, how many were targeted, and every
+  machine skipped with its reason.
+- **FR-025**: A shutdown that targets **fewer** machines than the document says it should
+  (partial resolution) MUST proceed, MUST log each unreachable machine at ERROR, and MUST
+  be distinguishable in status from a complete selection.
+- **FR-026**: Every failure message MUST name the document or machine at fault and an
+  actionable remedy. For a document in the retired vocabulary this MUST include the
+  conversion tool; for a missing host identity document it MUST name the package that
+  provides it.
 
 **Compatibility across packages**
 
@@ -396,8 +445,12 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
   the demonstration is recorded.
 - **SC-011**: A count of the retired vocabulary across shipped code and shipped prose
   returns zero, with exemptions listed.
-- **SC-012**: A reader of the shipped documentation can state, for each of the five cases
+- **SC-012**: A reader of the shipped documentation can state, for each of the six cases
   and for `force`, what a shutdown will do — verified by review against this section.
+- **SC-013**: A shutdown whose adopted machines are all unaddressable refuses, with or
+  without `force`, and names every one of them.
+- **SC-014**: Every failure message names the offending document or machine and a remedy —
+  verified per failure kind, not in aggregate.
 
 ## Assumptions
 
@@ -416,9 +469,8 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
   control and status. Only the topology-dependent operations refuse.
 - Case 3's refusal is the correct default because an unadopted machine in the document is
   evidence that machines exist; `force` is the documented way to power them off anyway.
-- The readiness gate's adoption filter follows from Q3 by analogy (no `force` exists at
-  boot). If operators expect unadopted machines to be waited for, this is the one decision
-  to revisit.
+- The readiness gate's adoption filter is **confirmed** (Q4), not derived: adopted machines
+  only, unadopted ones named as skipped.
 - No change to the operator-facing HTTP surface is implied beyond the refusal reasons and
   the status detail required by FR-014, which are additive.
 - The retired-vocabulary default hostname in the legacy client entry point is a network

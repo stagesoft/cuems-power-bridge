@@ -58,8 +58,10 @@ replaced.
 
 ## 2. Unit level — the adapter
 
-Each of the five shutdown cases and the readiness gate is driven by a fixture directory
-containing a schema-valid `network_map.xml` plus a `settings.xml`:
+Each of the six shutdown cases and the readiness gate is driven by a fixture directory
+under `tests/fixtures/network_map/`, containing a schema-valid `network_map.xml` plus a
+`settings.xml`. The authoritative list of `TopologyError` kinds is
+[data-model.md](./data-model.md) §2.3; this table is the fixture inventory:
 
 | Fixture | Shape | Expected |
 |---|---|---|
@@ -67,6 +69,9 @@ containing a schema-valid `network_map.xml` plus a `settings.xml`:
 | `map-two-adopted` | self + 2 adopted | Case 2: both targeted, `skipped=[]` |
 | `map-none-adopted` | self + 2 unadopted | Case 3: `TopologyError` **not** raised; selection empty with both machines in `skipped(unadopted)` → caller refuses |
 | `map-mixed` | self + 1 adopted + 1 unadopted | Case 2 targets one, names the other in `skipped` |
+| `map-unresolvable` | self + 2 adopted, neither with `role_id`/`alias`/`hostname` | Case 3b: refused `no_resolvable_nodes`, with and without `force` |
+| `map-partial-resolve` | self + 1 adopted addressable + 1 adopted unresolvable | proceeds, `partial=true`, ERROR names the unresolvable one |
+| `map-adopted-no-ip` | self + 2 adopted, no `<ip>` | readiness gate settles **with a WARNING** naming both — not reported as standalone |
 | `map-pre007` | retired vocabulary | Case 5: load raises, classified `network_map_retired_vocabulary` |
 | `map-no-self` | no entry for this host | Case 5: `self_entry_missing` |
 | `map-incomplete` | a node missing `<mac>` | Case 5: `network_map_invalid` |
@@ -78,7 +83,8 @@ to "simplify" away:
 - a machine with `role_id`, `alias` **and** `hostname` resolves by `role_id`;
 - a machine with only `hostname` resolves by `hostname`;
 - a machine with none of the three is **reported unresolvable**, never dropped, and its
-  `<ip>` is never used;
+  `<ip>` is never used; all-unresolvable refuses (Case 3b), some-unresolvable proceeds with
+  `partial=true`;
 - the readiness gate **does** use `<ip>`, and skips an adopted machine without one, with a
   warning;
 - an absent `adopted` element counts as not adopted.
@@ -101,8 +107,10 @@ Assert per [contracts/http-shutdown.md](./contracts/http-shutdown.md): the codes
 `arming-shelly` — the state must go back to `idle`.
 
 **Auto-load**, driven independently: with a map listing two adopted machines with `<ip>`,
-the gate waits for both; with a map listing none, it takes the single-controller settle
-path; with an unreadable map, it does **not** take that path and reports the failure.
+the gate waits for both; with a map listing no adopted machine at all, it takes the
+single-controller settle path and says so; with adopted machines that carry no `<ip>`, it
+settles **with a WARNING** naming them (not reported as standalone); with an unreadable
+map, it does **not** take that path and reports the failure.
 
 "The bridge works now" is not an answer to either — they are separate runs.
 

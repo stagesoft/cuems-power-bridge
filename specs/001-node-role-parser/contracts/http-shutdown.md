@@ -26,20 +26,32 @@ Envelope, unchanged: `{"ok": bool, "reason"?: "<token>"}`.
 | — | project running, `force` unset, `refuse_if_running` | 409 | `… "project_running"` | untouched |
 | **5** | topology unreadable — **`force` does NOT override** | **503** | `{"ok": false, "reason": "topology_unreadable", "detail": "<kind>"}` | **untouched** |
 | **3** | machines exist, none adopted, `force` unset | **409** | `{"ok": false, "reason": "no_adopted_nodes", "found": <n>, "skipped": [<name>, …]}` | **untouched** |
+| **3b** | machines would be targeted, **none addressable** — **`force` does NOT override** | **409** | `{"ok": false, "reason": "no_resolvable_nodes", "found": <n>, "unresolvable": [<uuid>, …]}` | **untouched** |
 | **1** | read OK, only the self entry | 200 | `{"ok": true}` | cut after the timer |
 | **2** | read OK, adopted machines targeted | 200 | `{"ok": true}` | cut after the timer |
 | **4** | `force=1` — every machine targeted | 200 | `{"ok": true}` | cut after the timer |
 | — | Shelly RPC failed after retries | 502 | `… "shelly_unreachable"` | **untouched** (fail-safe) |
 
-`detail` for `topology_unreadable` is one of: `settings_xml_missing`,
+Every refusal body's message names the offending document or machine and a remedy
+(FR-026). `detail` for `topology_unreadable` is one of: `settings_xml_missing`,
 `settings_xml_invalid`, `network_map_missing`, `network_map_invalid`,
 `network_map_retired_vocabulary`, `self_entry_missing`, `config_dir_mismatch`.
 
-### `force=1` semantics — two effects, one non-effect
+### `force=1` semantics — two effects, two non-effects
 
 1. overrides the running-project refusal (existing behaviour, unchanged);
 2. overrides the adoption filter: **every** machine in the document is targeted;
-3. does **not** override `topology_unreadable` — *force overrides policy, never evidence*.
+3. does **not** override `topology_unreadable` (Case 5);
+4. does **not** override `no_resolvable_nodes` (Case 3b) — an unreachable machine cannot be
+   commanded off by asserting harder. *Force overrides policy, never evidence.*
+
+### Partial resolution
+
+When some targets resolve and others do not, the shutdown **proceeds** (200) with those it
+can reach, logs each unresolvable machine at ERROR, and reports
+`node_selection.partial: true`. A monitor alerts on that field; the shutdown is not
+refused, because leaving the venue powered on is the worse outcome (spec, *Partial
+resolution*).
 
 **Operator-visible consequence**: the shipped Shelly mJS sends `force=1` by default
 (`FORCE = true`), so the wall switch powers off every machine and does not stop for a
@@ -65,8 +77,10 @@ All existing keys keep their shape and meaning. One key is added:
     "found": 3,
     "adopted": 2,
     "targeted": 2,
+    "partial": false,
     "skipped": [
-      {"node": "node03", "reason": "unadopted"}
+      {"node": "node03", "reason": "unadopted"},
+      {"node": "4f3c…", "reason": "unresolvable"}
     ],
     "source": "network_map.xml",
     "read_ok": true,
@@ -78,6 +92,8 @@ All existing keys keep their shape and meaning. One key is added:
 - `mode` is `"none"` before the first read, and after a failed one.
 - `read_ok: false` with `read_error: "<kind>"` is the Case 5 signal a monitor can alert on
   **without** triggering a shutdown to discover it.
+- `partial: true` means the selection was short of what the document implies — some
+  machine could not be addressed (FR-025).
 - `controller_only` (Case 1) and `read_ok: false` (Case 5) are the two shapes that today
   are indistinguishable. A consumer MUST be able to tell them apart from this object alone
   (FR-004, FR-014).

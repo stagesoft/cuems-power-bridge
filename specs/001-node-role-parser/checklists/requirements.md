@@ -32,7 +32,10 @@
 
 ## Notes
 
-- All items pass; the spec is ready for `/speckit-plan`.
+- All items pass; the spec is ready for implementation.
+- Revised 2026-09-23 after `/speckit-analyze`: Case 3b (no addressable target), the
+  partial-resolution rule, the three-state readiness gate, and FR-025/FR-026 were added;
+  Q4 confirmed the readiness adoption filter.
 - Q1 and Q3 are written up as a normative, operator-readable section (**Shutdown target
   selection**): five named cases, the two meanings of `force`, and the wall-switch
   consequence. FR-024 and SC-012 make that documentation a deliverable rather than a

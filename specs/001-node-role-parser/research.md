@@ -139,7 +139,8 @@ switch, which sends `force`, still powers everything off.
 not scattered at the call sites:
 
 - `shutdown_targets(..., include_unadopted: bool)` → resolved avahi names + a report of
-  what was skipped and why (unresolvable, unadopted, self)
+  what was skipped and why (unresolvable, unadopted, self), and a `partial` flag when some
+  machine that should have been targeted is unresolvable (spec *Partial resolution*)
 - `readiness_peers(...)` → `(ip, label)` for adopted machines carrying an `<ip>`
 
 **Rationale.** D11 forbids re-implementing the node model, but *selection policy* is this
@@ -276,7 +277,7 @@ whole refactor is in flight across the three repositories simultaneously.
 |---|---|---|
 | `cuems-utils` | `0.1.0rc16` (`src/cuemsutils/__init__.py:4`) — ships `/etc/cuems/settings.xml` | unreleased, on `feat/xml-refactor` |
 | `cuems-common` | `1.3.0-23` (`debian/changelog:1`, marked **UNRELEASED**) — carries the fixed `cuems-cluster-poweroff` | unreleased, on `feat/xml-refactor` |
-| `cuems-power-bridge` | next version after `0.3.0-6` — proposed **`0.3.1-1`** (behaviour change: two new refusals, adoption filtering) | this feature |
+| `cuems-power-bridge` | **`0.3.1-1`** — settled 2026-09-23 (behaviour change: three new refusals, adoption filtering) | this feature |
 
 Resulting version relationships, concrete rather than placeheld:
 
@@ -292,5 +293,5 @@ changelog entry** rather than opening a new revision.
 Open only as verification, not as unknowns:
 
 - confirm the built `cuems-utils` `0.1.0rc16` `.deb` installs `/etc/cuems/settings.xml`
-  (Phase F);
-- confirm the bridge's own release number at cut time if `0.3.1-1` is not what is used.
+  (Phase F). The bridge's own number is settled at `0.3.1-1`, so the reciprocal `Breaks:` in
+  `cuems-common` can be written without waiting.
