@@ -15,12 +15,13 @@ Package: cuems-power-bridge
 Architecture: all
 Depends: ${misc:Depends},
          ${python3:Depends},
-         cuems-utils (>= 0.1.0rc5),
-         cuems-common (>= 1.0.0),
+         cuems-utils (>= 0.1.0rc16),
+         cuems-common (>= 1.3.0-23),
          python3 (>= 3.11),
          python3-systemd (>= 235),
          openssh-client,
          iputils-ping
+Breaks: cuems-common (<< 1.3.0-23)
 Description: CUEMS power bridge — Shelly + Companion shutdown coordinator
  cuems-power-bridge is the HTTP-fronted coordinator that orchestrates
  orderly cluster shutdown when an operator flips the wired Shelly Pro 1
@@ -31,7 +32,7 @@ Description: CUEMS power bridge — Shelly + Companion shutdown coordinator
  .
  The bridge maintains persistent WebSocket connections to the controller
  engine (:9190, binary OSC) and the editor (:9092, JSON). It refuses
- shutdown while a project is running, SSHes every NodeType.slave from
+ shutdown while a project is running, SSHes every adopted node from
  /etc/cuems/network_map.xml to power them off, polls until they go
  silent on the network, arms a Shelly hardware safety timer, then
  systemctl-poweroffs the controller — the Shelly cuts mains a configured

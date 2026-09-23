@@ -143,12 +143,12 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 
 **Independent Test**: run `cuems-cluster-poweroff` against this package's library on a converted map and compare its target list with the bridge's; then attempt the refused install combination on a test host.
 
-- [ ] T039 [US3] Make `cuemsutils` a real, non-optional, bounded dependency in `pyproject.toml` — remove it from `[tool.poetry.extras]`, pin `>=0.1.0rc16,<0.1.1` (research R2)
-- [ ] T040 [US3] Update `debian/control`: `cuems-utils (>= 0.1.0rc16)`, `cuems-common (>= 1.3.0-23)`, and `Breaks: cuems-common (<< 1.3.0-23)` (FR-016, contracts/venv-library-surface.md)
-- [ ] T041 [US3] Port `../cuems-common/usr/bin/cuems-cluster-poweroff` stage 2 (`:274-275`) onto the adapter's `shutdown_targets(...)`, so all six cases hold identically whether a shutdown comes through HTTP or the poweroff transition
-- [ ] T042 [US3] Correct the stale docstring at `../cuems-common/usr/bin/cuems-cluster-poweroff:240` ("matches the network_map `NodeType.master` entry")
-- [ ] T043 [US3] Add `Breaks: cuems-power-bridge (<< 0.3.1-1)` to `../cuems-common/debian/control`, leaving `Suggests: cuems-power-bridge` unversioned and unchanged (it must stay installable with no bridge present)
-- [ ] T044 [US3] Record the cuems-common half in its open `../cuems-common/debian/changelog` entry `1.3.0-23` (UNRELEASED) rather than opening a new revision
+- [X] T039 [US3] Make `cuemsutils` a real, non-optional, bounded dependency in `pyproject.toml` — remove it from `[tool.poetry.extras]`, pin `>=0.1.0rc16,<0.1.1` (research R2)
+- [X] T040 [US3] Update `debian/control`: `cuems-utils (>= 0.1.0rc16)`, `cuems-common (>= 1.3.0-23)`, and `Breaks: cuems-common (<< 1.3.0-23)` (FR-016, contracts/venv-library-surface.md)
+- [X] T041 [US3] Port `../cuems-common/usr/bin/cuems-cluster-poweroff` stage 2 (`:274-275`) onto the adapter's `shutdown_targets(...)`, so all six cases hold identically whether a shutdown comes through HTTP or the poweroff transition
+- [X] T042 [US3] Correct the stale docstring at `../cuems-common/usr/bin/cuems-cluster-poweroff:240` ("matches the network_map `NodeType.master` entry")
+- [X] T043 [US3] Add `Breaks: cuems-power-bridge (<< 0.3.1-1)` to `../cuems-common/debian/control`, leaving `Suggests: cuems-power-bridge` unversioned and unchanged (it must stay installable with no bridge present)
+- [X] T044 [US3] Record the cuems-common half in its open `../cuems-common/debian/changelog` entry `1.3.0-23` (UNRELEASED) rather than opening a new revision
 - [ ] T045 [US3] Rehearse the refused half-upgrade on a test host and record it in `specs/001-node-role-parser/evidence/upgrade-refusal.txt` (SC-009)
 
 **Checkpoint**: the cutover is mechanical, not a note in a document.
@@ -161,21 +161,21 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 
 **Independent Test**: present the retired-vocabulary document and confirm a named, actionable failure rather than an empty answer.
 
-- [ ] T046 [P] [US4] Assert in `tests/test_network_map_ips.py` that the retired-vocabulary fixture raises with a message naming the document, the offending machine and the conversion tool (FR-003, SC-007)
-- [ ] T047 [US4] Confirm the recorded failing run from T001 is complete and legible as the FR-021/SC-008 artifact, referenced from `specs/001-node-role-parser/evidence/README.md`
-- [ ] T048 [US4] Count the retired vocabulary across shipped code and shipped prose and record it with the exempt set and reasons in `specs/001-node-role-parser/evidence/retired-vocabulary-count.txt` — exemptions: the deliberately pre-007 fixture; excluded by reason: `src/cuemspowerbridge/wsclient.py:69-70`'s `master.local` (an mDNS hostname, not the role field) (FR-023, SC-011)
+- [X] T046 [P] [US4] Assert in `tests/test_network_map_ips.py` that the retired-vocabulary fixture raises with a message naming the document, the offending machine and the conversion tool (FR-003, SC-007)
+- [X] T047 [US4] Confirm the recorded failing run from T001 is complete and legible as the FR-021/SC-008 artifact, referenced from `specs/001-node-role-parser/evidence/README.md`
+- [X] T048 [US4] Count the retired vocabulary across shipped code and shipped prose and record it with the exempt set and reasons in `specs/001-node-role-parser/evidence/retired-vocabulary-count.txt` — exemptions: the deliberately pre-007 fixture; excluded by reason: `src/cuemspowerbridge/wsclient.py:69-70`'s `master.local` (an mDNS hostname, not the role field) (FR-023, SC-011)
 
 ---
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T049 [P] Rewrite the shipped package description at `debian/control:34` ("SSHes every NodeType.slave from /etc/cuems/network_map.xml") in the current vocabulary
-- [ ] T050 [P] Update the five README sites carrying the retired vocabulary (`README.md:320,323,476,767,1265` — re-measure before editing)
-- [ ] T051 Add the operator-facing documentation FR-024 requires to `README.md`: the **six** shutdown cases, the partial-resolution rule, both meanings of `force` and its two non-effects, and the wall-switch consequence (the shipped mJS sends `force` by default, so the physical switch powers off every machine and does not stop for a running show; `--safe` changes that) (SC-012)
-- [ ] T052 [P] Add the `debian/changelog` entry for `0.3.1-1` describing the behaviour change: adoption filtering, the three new refusals, the partial marker, and the required cuems-common pairing
+- [X] T049 [P] Rewrite the shipped package description at `debian/control:34` ("SSHes every NodeType.slave from /etc/cuems/network_map.xml") in the current vocabulary
+- [X] T050 [P] Update the five README sites carrying the retired vocabulary (`README.md:320,323,476,767,1265` — re-measure before editing)
+- [X] T051 Add the operator-facing documentation FR-024 requires to `README.md`: the **six** shutdown cases, the partial-resolution rule, both meanings of `force` and its two non-effects, and the wall-switch consequence (the shipped mJS sends `force` by default, so the physical switch powers off every machine and does not stop for a running show; `--safe` changes that) (SC-012)
+- [X] T052 [P] Add the `debian/changelog` entry for `0.3.1-1` describing the behaviour change: adoption filtering, the three new refusals, the partial marker, and the required cuems-common pairing
 - [ ] T053 Build the package and assert the shared-venv rule: `dpkg-deb -c ../cuems-power-bridge_*.deb` shows **no** `site-packages/cuemsutils` and **does** show the aiohttp stack; record in `specs/001-node-role-parser/evidence/deb-contents.txt` (FR-017, Principle VI, research R10)
 - [ ] T054 Verify the built `cuems-utils` `0.1.0rc16` `.deb` installs `/etc/cuems/settings.xml` (its packaging lives on the `debian/bookworm` branch) and record it in `specs/001-node-role-parser/evidence/settings-xml-provenance.txt`
-- [ ] T055 Run the full suite green through the documented runner and record the final count in `specs/001-node-role-parser/evidence/final-suite.txt`
+- [X] T055 Run the full suite green through the documented runner and record the final count in `specs/001-node-role-parser/evidence/final-suite.txt`
 - [ ] T056 [US1] Hardware rehearsal 1 — orderly power-off on a real cluster (`dry_run` first, then live): adopted machines go off, the poll confirms them, the Shelly arms, the controller powers off, mains cuts on an already-off box; record in `specs/001-node-role-parser/evidence/hardware-verification.md` (FR-022, SC-010)
 - [ ] T057 [US2] Hardware rehearsal 2 — cold boot with nodes powered: the gate waits for the adopted machines, the show loads and arms, and `settle=45` / `armed_timeout=125` still hold; record in `specs/001-node-role-parser/evidence/hardware-verification.md` as a **separate** run from T056 (FR-022, SC-010)
 - [ ] T058 Negative rehearsal, no cluster needed: an unconverted map makes `/shutdown` refuse `503` and leaves mains on, `force=1` included; record in `specs/001-node-role-parser/evidence/hardware-verification.md`
