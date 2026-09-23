@@ -242,6 +242,19 @@ observe it reports one clear message and does not fail the shutdown.
   provides. Its polling loop, its retry settings and its use of the local API stay as they
   are.
 
+**Preserved behaviour the relocation must not drop**
+
+- **FR-023**: The display stage MUST keep obeying the configuration switch that disables it,
+  reporting that it is disabled and succeeding without touching any device. Venues keep
+  configured fleets dark deliberately.
+- **FR-024**: Both power-off initiators — the daemon and the system transition — MUST use
+  **one** SSH host-key store, so a re-imaged machine cannot be trusted by one and unknown to
+  the other, discovered mid-shutdown.
+- **FR-025**: The lock MUST be released before the daemon triggers the local power-off, because
+  that command re-enters the same sequence through the system transition. A re-entrant
+  transition MUST acquire the lock cleanly; a failure to acquire MUST mean another power-off is
+  genuinely in progress.
+
 **Findings fixed in passing** (each is a defect this move must not carry across)
 
 - **FR-017**: The script's own reading of this host's identity document MUST be replaced by
@@ -296,6 +309,10 @@ observe it reports one clear message and does not fail the shutdown.
   clear line.
 - **SC-006**: The coordinated candidate performs an orderly power-off on a real controller,
   and a mixed pair is refused by the package manager.
+- **SC-012**: With the display switch off, a power-off through either entry point leaves every
+  device untouched and still reports success.
+- **SC-013**: A power-off initiated through the API completes its re-entrant transition with
+  both stages running — the lock never refuses the transition the daemon itself caused.
 - **SC-011**: Every hardware- or human-dependent check for this feature **and the previous
   one** appears on one ledger with an explicit state; none is left to prose. A technician can
   run the whole ecosystem's validation from the three repositories' ledgers in one pass.

@@ -19,11 +19,13 @@ where it is maintained" (SC-002), and the equivalence tests are the deliverable 
 **the systemd + Shelly path is the product**; every safeguard this feature adds must be
 provably absent from it.
 
-**Revision 2026-09-23** (post-`/speckit-analyze`): the sequence lock now spans a whole
-sequence with the wrapper holding it across both stages (C1); manual runs require `sudo` and
-say so (H1); plus the coverage and consistency fixes G1–G3, U1, F1, D1, A1. **H2 — the
-existing shutdown tests versus the daemon's new lock acquisition — is deliberately left for
-the re-analysis after these edits.**
+**Revision 2026-09-23** (two `/speckit-analyze` passes). First pass: the lock spans a whole
+sequence, held by the wrapper across both stages (C1); manual runs require `sudo` and say so
+(H1); coverage fixes G1–G3, U1, F1, D1, A1. Second pass, against
+`specs/planning/cuems-common-machinery-to-absorb.md` as an additional authority: the daemon
+releases the lock before the local power-off so its own re-entrant transition is not refused
+(C2); the display-stage config gate is preserved (G4); one shared SSH host-key store (G5); the
+lock path is injectable so the suite stops depending on `/run` (H2); plus F2, F3, G6, U2, D2.
 
 **Release**: everything lands in the versions already open — `cuems-power-bridge 0.3.1-1`,
 `cuems-common 1.3.0-23` — under the coordinated `xml-refactor-merge-candidate` tag. The final
@@ -67,11 +69,18 @@ Baseline: **185 passed** (feature 001).
 **⚠️ Blocks every user story. T007–T011 are the extraction — reviewed as a move.**
 
 - [ ] T005 Implement `src/cuemspowerbridge/shutdown_lock.py`: a non-blocking exclusive `flock` over `/run/cuems-power-bridge/shutdown.lock`, as a context manager that raises a typed "already held" error rather than waiting; a **no-op mode** for a caller that already holds it (research R2a); a precondition failure when the directory is absent; and a `PermissionError` mapped to "run this with sudo" — **never proceed unlocked** (research R2b, data-model §4)
+- [ ] T005a Make the lock location a parameter of `src/cuemspowerbridge/shutdown_lock.py` defaulting to `/run/cuems-power-bridge/shutdown.lock`, and add a `tests/conftest.py` fixture pointing it at `tmp_path` — otherwise the 13 existing tests that call `handle_shutdown` directly start depending on `/run/cuems-power-bridge` existing on whoever's machine runs the suite (analysis H2)
 - [ ] T006 [P] Test the lock in `tests/test_shutdown_lock.py`: a second acquisition fails immediately; the lock is released when the holding process dies; a missing directory and an unreadable one are precondition errors, not unlocked runs; and the no-op mode does not acquire anything
 - [ ] T007 Create `src/cuemspowerbridge/cluster_shutdown.py` with `ShutdownContext` (`cfg`, `displays`, `shelly`, `progress` — and deliberately **no** `engine`) and `ShutdownOutcome` per [data-model.md](./data-model.md) §1, §3
 - [ ] T008 Move the shared six-case decision into `src/cuemspowerbridge/cluster_shutdown.py` as a pure function of `(selection, force)` returning `ShutdownDecision` (data-model §2), leaving the HTTP/CLI mapping to the callers
 - [ ] T009 Move the sequence from `src/cuemspowerbridge/bridge.py:508-644` into `run_cluster_shutdown()` in `src/cuemspowerbridge/cluster_shutdown.py` — steps, order, timeouts and log lines unchanged; state reported through `progress` instead of `_set_state`
+- [ ] T009a Preserve the display-stage gate in `src/cuemspowerbridge/cluster_shutdown.py`: `projector_power_off_on_shutdown=false` reports "leaving displays alone" and returns success without touching a device; keep the existing "no displays configured" and "fleet unreachable" branches verbatim (FR-023, inventory §2.1)
+- [ ] T009b [P] Test all three display-stage gates in `tests/test_cluster_shutdown.py`, including that a closed gate exits 0 through the CLI and does not mark the run degraded
 - [ ] T010 Add self-exclusion to `src/cuemspowerbridge/cluster_shutdown.py` per [data-model.md](./data-model.md) §5 — uuid via `NodeView.is_self`, then **exact** address-set membership (never a substring test), then hostname/FQDN — with the duplicate-entry reason recorded in a comment (FR-019)
+- [ ] T010a Release the sequence lock **explicitly** in `src/cuemspowerbridge/cluster_shutdown.py` immediately before the local power-off command is issued — that command re-enters this same sequence through the system transition, and a still-held lock would make the wrapper refuse and run neither stage (research R2a-i, analysis C2)
+- [ ] T010b [P] Assert the release point in `tests/test_cluster_shutdown.py`: the lock is free by the time the local power-off is issued, and a re-entrant acquisition succeeds while the sequence is finishing
+- [ ] T010c Pin one shared SSH host-key store in `src/cuemspowerbridge/node_executor.py`: `-o UserKnownHostsFile=/var/lib/cuems/.ssh/known_hosts` for every fan-out, so the daemon (as `cuems`) and the transition (as root) stop keeping separate stores; `StrictHostKeyChecking=accept-new` unchanged (FR-024, research R10, inventory §5.2)
+- [ ] T010d [P] Test in `tests/test_node_executor.py` that the pinned store appears in the argv of every SSH invocation and that a missing file is tolerated (first contact still accepted)
 - [ ] T011 Rewrite `handle_shutdown` in `src/cuemspowerbridge/bridge.py` as a thin caller: token, engine guard, **the new lock**, topology read, shared decision, `run_cluster_shutdown`, map `ShutdownOutcome` to HTTP and `/status`
 - [ ] T012 [P] Test the sequence in isolation in `tests/test_cluster_shutdown.py`: both stages, the partial-resolution marker, the reachability policies (FR-020), and self-exclusion including the duplicate-entry case
 - [ ] T012a [P] Assert the two carried-over defects are not reproduced, in `tests/test_cluster_shutdown.py`: the self uuid comes from `NodeView.is_self` and **not** from any private read of `settings.xml` (FR-017), and a topology failure raises rather than degrading to "no self entry" the way the old `own_uuid()` swallow did (FR-018)
@@ -117,8 +126,10 @@ for this package's name and find nothing.
 - [ ] T025 [US2] Delete the two Python heredocs from `../cuems-common/usr/bin/cuems-cluster-poweroff` and call `cuems-power-bridge-cluster-poweroff --stage displays|nodes` with the conffile's values passed as arguments, plus `--transition --lock-held`
 - [ ] T025a [US2] Take the sequence lock **in the wrapper**, spanning both stages: `exec 9>/run/cuems-power-bridge/shutdown.lock; flock -n 9 || { log …; exit 4; }` in `../cuems-common/usr/bin/cuems-cluster-poweroff`, so no other power-off can start in the gap between them (research R2a — this is the analysis C1 fix, and the gap it closes is on the product path)
 - [ ] T026 [US2] Keep the wrapper's own responsibilities in `../cuems-common/usr/bin/cuems-cluster-poweroff` (research R8): the poweroff-vs-reboot `systemctl list-jobs` check, `enabled=`, the per-stage `timeout` bounds, the ordering probe — and switch its "is the bridge installed?" probe from the venv interpreter to `command -v cuems-power-bridge-cluster-poweroff`
+- [ ] T026a [US2] Mark `venv_python` in `../cuems-common/etc/cuems/cluster-poweroff.conf` as retained-but-unused, with the reason: after T026 the probe is `command -v`, so the key is no longer consulted. It is a conffile, so it cannot simply vanish — but a key that lies is how an operator is misled during an incident (inventory §2.3, analysis F2). `bridge_url` stays: `cuems-displays-on` still uses it
 - [ ] T027 [US2] Replace the two Python one-liners in `../cuems-common/usr/bin/cuems-displays-on` with `cuems-power-bridge-config --get`, leaving its polling loop, retry knobs and `curl` usage untouched (FR-016)
 - [ ] T028 [P] [US2] Assert in `tests/test_sibling_decoupling.py` that neither sibling script mentions `cuemspowerbridge` (a repository-local check of the sibling checkout, skipped when it is absent)
+- [ ] T028a [US2] Fix the stale header of `../cuems-common/etc/sudoers.d/99-cuems-poweroff` — it describes node-side `cuems` users receiving the bridge's SSH, but the target has been `cuems-admin` since the hardening (inventory §9, analysis D2)
 - [ ] T029 [US2] Record the `cuems-common` half in its open `debian/changelog` entry `1.3.0-23` — the same entry that already carries feature 001's half
 - [ ] T029a [US2] Update `../cuems-common`'s prose for the CLI switch: the operator-tool row in its `README.md` and `docs/upgrade-verification.md` §7 currently say selection comes "through the bridge's topology adapter", which describes feature 001 and goes stale the moment the wrapper calls a tool instead (analysis G3)
 - [ ] T030 [US2] Record the supersession in **this** feature's [contracts/cli.md](./contracts/cli.md) — feature 001's `contracts/venv-library-surface.md` is a merged feature's record and stays as written; the note that it is discharged belongs here, where the replacing contract lives
@@ -149,6 +160,7 @@ for this package's name and find nothing.
 
 **Independent Test**: exercise each degradation path on a host or in a shell harness.
 
+- [ ] T036a [P] [US4] Run `systemd-analyze verify ../cuems-common/etc/systemd/system/cuems-cluster-poweroff.service` and `bash -n` over the rewritten wrapper; record both in `specs/002-cluster-poweroff-cli/evidence/unit-verify.txt` (inventory §7.6, analysis G6)
 - [ ] T037 [P] [US4] Verify `../cuems-common/usr/bin/cuems-cluster-poweroff` with the tool absent: one ERROR line, exit 0, shutdown unimpeded (`bash -n` plus a PATH-stubbed run)
 - [ ] T038 [P] [US4] Verify `enabled=false` in `../cuems-common/etc/cuems/cluster-poweroff.conf` still short-circuits `../cuems-common/usr/bin/cuems-cluster-poweroff` before either stage
 - [ ] T039 [P] [US4] Verify `nodes_off=false` in `../cuems-common/etc/cuems/cluster-poweroff.conf` still makes `../cuems-common/usr/bin/cuems-cluster-poweroff` run the display stage only

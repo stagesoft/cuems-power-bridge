@@ -104,6 +104,34 @@ Neither derives anything the sequence did not state.
 | On contention | refuse immediately, naming that a power-off is in progress. Never queue. |
 | On permission error | exit 3 with "run this with sudo" — never proceed unlocked |
 | On holder death | released by the kernel — no stale-lock handling, which is how lock files usually become their own outage |
+| **Released before the local power-off** | the daemon drops the lock **explicitly** just before running its power-off command, because that command re-enters this same sequence through the system transition (research R2a-i). By then every irreversible step is done and stage 1 is idempotent, so the re-entry is a fast no-op rather than a refusal |
+| Path is injectable | the lock location is a parameter defaulting to the runtime path, so the suite can point it at a temporary directory instead of depending on `/run` existing on the developer's machine (analysis H2) |
+
+---
+
+## 4a. SSH host-key store — one, shared
+
+Both initiators — the daemon as `cuems`, the transition as root — use
+**`/var/lib/cuems/.ssh/known_hosts`**, pinned explicitly rather than inherited from `HOME`
+(research R10). `StrictHostKeyChecking=accept-new` is unchanged.
+
+Two stores would mean a node re-imaged between a daemon shutdown and a transition shutdown is
+trusted by one initiator and unknown to the other, discovered mid-shutdown. One store is also
+one place to audit when a node is replaced.
+
+---
+
+## 4b. Stage gates — the sequence obeys the configuration it always has
+
+| Stage | Gate | Behaviour when the gate is closed |
+|---|---|---|
+| displays | `cfg.projector_power_off_on_shutdown` | report "disabled — leaving displays alone" and return **success**; touch nothing |
+| displays | `DisplayManager.configured` | report "no displays configured", return success |
+| displays | every device answers `unknown` | report the fleet unreachable and skip the power-off, as today |
+| nodes | the caller's `--force` / adoption filter | the six documented outcomes |
+
+The first row is easy to lose in a relocation and expensive to lose in the field: venues keep
+configured fleets dark on purpose, which is why the gate exists (inventory §2.1, §2.3).
 
 ---
 

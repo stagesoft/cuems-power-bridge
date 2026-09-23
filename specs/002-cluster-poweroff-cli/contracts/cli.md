@@ -56,6 +56,13 @@ saying exactly that. The help output and the module docstring say it too.
 the poweroff transaction — by then the machine is going down regardless, and the wrapper's
 job is to make the reason legible afterwards.
 
+### Configuration gates the tool still obeys
+
+`--stage displays` honours `projector_power_off_on_shutdown` from `power-bridge.conf`: when
+it is false the tool prints "projector_power_off_on_shutdown=false — leaving displays alone"
+and exits **0**. Venues keep configured fleets dark deliberately, and a relocation that
+dropped this gate would command them off at every shutdown.
+
 ### Output
 
 Line-oriented, unbuffered, on stdout; the wrapper forwards each line to the journal. Every
@@ -77,7 +84,10 @@ cuems-power-bridge-config --get <key> [--config PATH]
 ```
 
 Prints one bare value to stdout and exits 0; exits 3 for an unknown key or an unreadable
-configuration file. It exists so `cuems-displays-on` can stop importing this package's
+configuration file. **A key that is set to an empty value prints an empty line and exits 0** —
+that is a legitimate configuration, and `cuems-displays-on` branches on the empty string to
+decide whether to send an auth header at all. Only "no such key" and "cannot read the config"
+are errors. It exists so `cuems-displays-on` can stop importing this package's
 modules for the two values it needs (`projector_power_on_on_start`, `shared_token`).
 
 **Secrets**: the value is printed to stdout only, and the *key* is the argument — a token
@@ -109,3 +119,8 @@ across the whole" defect this feature exists to remove. The wrapper therefore pa
 **Permission**: `0770 cuems cuems`. A caller that cannot open it exits **3** with "run this
 with sudo"; it never proceeds unlocked. Widening the mode is rejected deliberately — it would
 let any account that can open the file block a cluster power-off.
+
+**Re-entry**: the daemon's own `/shutdown` ends by triggering the system power-off transition,
+which runs the wrapper again. The daemon **releases the lock before issuing that command**
+(research R2a-i), so the wrapper acquires it cleanly and a failure to acquire means what it
+says — another power-off is genuinely in progress.

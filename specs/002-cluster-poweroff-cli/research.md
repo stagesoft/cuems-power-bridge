@@ -121,6 +121,48 @@ inherited file descriptor would silently run unlocked when the guess was wrong.
 **Using `--lock-held` without actually holding it is a caller bug**, and the only caller that
 may pass it is the wrapper. The CLI states as much in its help.
 
+### R2a-i. The daemon RELEASES the lock before the local power-off (analysis C2)
+
+The bridge's own `/shutdown` ends by running `sudo systemctl poweroff --no-block`, which
+starts a transaction that runs **this same wrapper** (inventory §2.1: *"the bridge's own
+`/shutdown` step 10 (which re-enters it)"*). If the daemon still held the sequence lock at
+that moment, the wrapper's `flock -n` would fail and **neither stage would run** — a silent
+skip on the product path, which is precisely the failure this feature exists to remove.
+
+Today that only works by accident: the unit's `Before=cuems-power-bridge.service` edge stops
+the daemon first, and the kernel releases the lock when the process dies. That is a
+dependency on stop ordering *and* on SIGKILL timing, written down nowhere.
+
+**Decision (user): option (a) — the daemon releases the lock immediately before issuing the
+local power-off command**, and the release is explicit, not a side effect of exiting. By that
+point every irreversible step is done: the nodes are commanded off and confirmed, the Shelly
+timer is armed, the mains-cut deadline exists. Nothing the re-entrant transition can do will
+interleave with a sequence that has already finished its decisions, and stage 1's design is
+idempotent precisely so this re-entry is a fast no-op.
+
+The wrapper therefore always acquires the lock cleanly on the re-entrant path, and a failure
+to acquire means what it says: *another* power-off is genuinely in progress.
+
+### R10. One `known_hosts` for both initiators (analysis G5, inventory §5.2/§10)
+
+**Measured.** The daemon SSHes as `cuems` (`HOME=/var/lib/cuems`) and the transition SSHes as
+root (`Environment=HOME=/root`), each with `StrictHostKeyChecking=accept-new`. They share one
+key and **two** host-key stores. The inventory reserved this decision for exactly this moment:
+*"Absorbing A1 is the moment to decide whether that is intended."*
+
+**Decision (user): one shared store, `/var/lib/cuems/.ssh/known_hosts`**, pinned explicitly
+with `-o UserKnownHostsFile=` in `node_executor` so both initiators use it regardless of who
+they run as. The directory is owned by `cuems`; root writes to it regardless of mode.
+
+**Rationale.** With two stores, a node re-imaged between a daemon-initiated shutdown and a
+transition-initiated one is *trusted by one initiator and unknown to the other* — and the
+discovery happens mid-shutdown, on the path where nobody is watching. One store also means
+one place to audit after a node is replaced.
+
+**Consequence to implement**: the daemon currently writes that file implicitly through
+`HOME`; pinning it makes the behaviour explicit for both, and the file must be created (or
+tolerated absent) with `accept-new` semantics preserved.
+
 ### R2b. Who may run it by hand — `sudo` (analysis H1)
 
 The lock lives at `0770 cuems cuems`. The operator account `cuems-admin` gets its **own**
@@ -245,8 +287,10 @@ each keeping the version it already holds:
 - **Mixed-version tolerance stops being a requirement.** The candidate is validated as a set,
   on real machines, before anything is released. What replaces "it must survive a half
   upgrade" is "the whole candidate is verified together" (R7a).
-- The venv library surface may therefore be **removed** in the same change rather than kept
-  alive for a transitional release — once `cuems-common` stops importing it, nothing does.
+- The venv library surface stops being an **external contract** in the same change rather
+  than being kept alive for a transitional release. The code itself stays — the daemon and the
+  CLI both use `load_nodes`/`shutdown_targets`; what ends is its status as a frozen,
+  cross-package API (analysis F3).
 
 ## R7a. Consumer-state validation lands on a hardware checklist
 
