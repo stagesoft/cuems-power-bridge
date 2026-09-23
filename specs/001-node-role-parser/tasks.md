@@ -49,11 +49,11 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 **Purpose**: capture what cannot be captured later, and give the suite schema-valid inputs.
 **T001 is first and blocking: once the parser is replaced, its evidence is unobtainable.**
 
-- [ ] T001 Capture the pre-migration failing run into `specs/001-node-role-parser/evidence/pre-migration-parser-failure.txt` — today's `network_map.slave_avahi_names()` / `slave_ips()` against a converted fixture per [quickstart.md](./quickstart.md) §1, recording command, date, commit and the `([], [])` / `[]` output (FR-021, SC-008)
-- [ ] T002 Record the baseline suite state (`142 passed`) and the exact runner line in `specs/001-node-role-parser/evidence/baseline-suite.txt`
-- [ ] T003 [P] Create `tests/fixtures/network_map/` with one directory per case from [quickstart.md](./quickstart.md) §2, each holding a schema-valid `network_map.xml` plus a `settings.xml`: `map-controller-only`, `map-two-adopted`, `map-none-adopted`, `map-mixed`, `map-unresolvable`, `map-partial-resolve`, `map-pre007`, `map-no-self`, `map-incomplete`, `map-no-settings`
-- [ ] T004 [P] Validate every fixture in `tests/fixtures/network_map/` against `../cuems-utils/src/cuemsutils/xml/schemas/network_map.xsd` (canonical uuid, `mac`, `name`, `node_role`, `ip` all required) and record the command in `specs/001-node-role-parser/evidence/fixture-validation.txt`
-- [ ] T005 Add `tests/conftest.py` with a fixture that points the library at a `tests/fixtures/network_map/<case>` directory by setting the `CUEMS_CONF_PATH` environment variable (research R2: the library honours it **over** any `config_dir` argument) and restores it afterwards
+- [X] T001 Capture the pre-migration failing run into `specs/001-node-role-parser/evidence/pre-migration-parser-failure.txt` — today's `network_map.slave_avahi_names()` / `slave_ips()` against a converted fixture per [quickstart.md](./quickstart.md) §1, recording command, date, commit and the `([], [])` / `[]` output (FR-021, SC-008)
+- [X] T002 Record the baseline suite state (`142 passed`) and the exact runner line in `specs/001-node-role-parser/evidence/baseline-suite.txt`
+- [X] T003 [P] Create `tests/fixtures/network_map/` with one directory per case from [quickstart.md](./quickstart.md) §2, each holding a schema-valid `network_map.xml` plus a `settings.xml`: `map-controller-only`, `map-two-adopted`, `map-none-adopted`, `map-mixed`, `map-unresolvable`, `map-partial-resolve`, `map-pre007`, `map-no-self`, `map-incomplete`, `map-no-settings`
+- [X] T004 [P] Validate every fixture in `tests/fixtures/network_map/` against `../cuems-utils/src/cuemsutils/xml/schemas/network_map.xsd` (canonical uuid, `mac`, `name`, `node_role`, `ip` all required) and record the command in `specs/001-node-role-parser/evidence/fixture-validation.txt`
+- [X] T005 Add `tests/conftest.py` with a fixture that points the library at a `tests/fixtures/network_map/<case>` directory by setting the `CUEMS_CONF_PATH` environment variable (research R2: the library honours it **over** any `config_dir` argument) and restores it afterwards
 
 **Checkpoint**: evidence banked, fixtures exist and are schema-valid, the suite can aim the library at them.
 
@@ -65,19 +65,19 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 
 **⚠️ T006–T012 replace the private parser; they are the point of the feature (D11, D32, Principle III).**
 
-- [ ] T006 Add `NodeView` to `src/cuemspowerbridge/network_map.py` per [data-model.md](./data-model.md) §2.1 — `uuid`, `role` (imported `NodeRole`), `adopted` (**absent ⇒ `False`**, research R3), `role_id`/`alias`/`hostname`, `ip`, derived `avahi`, `is_self`; **no `node_type` attribute exists**
-- [ ] T007 Add `Selection` and `Skip` to `src/cuemspowerbridge/network_map.py` per [data-model.md](./data-model.md) §2.2 — `mode`, `partial`, `targets`, `found`, `adopted_count`, `skipped`; invariant: `targets ∪ skipped` is the full non-self machine set
-- [ ] T008 Add `TopologyError` with its seven `kind` values to `src/cuemspowerbridge/network_map.py` per [data-model.md](./data-model.md) §2.3, each message naming the offending document or machine **and a remedy** (FR-026); it MUST never be converted into an empty `Selection`
-- [ ] T009 Implement the loader in `src/cuemspowerbridge/network_map.py`: build `ConfigManager(config_dir=…, load_all=False)`, call `load_network_map()`, unwrap `["node_list"]`'s `{"node": …}` wrappers into `NodeView`s, and classify every library failure into a `TopologyError` kind (research R2)
-- [ ] T010 Implement `shutdown_targets(..., include_unadopted: bool)` in `src/cuemspowerbridge/network_map.py` (research R4) — preserving the avahi policy verbatim (`role_id → alias → hostname`, **never** `<ip>`, unresolvable machines reported in `skipped`), setting `partial=True` when some machine that should have been targeted is unresolvable (FR-025), and returning an empty target set with `adopted_count > 0` when **none** is addressable so the caller can raise Case 3b
-- [ ] T011 Implement `readiness_peers(...)` in `src/cuemspowerbridge/network_map.py` — adopted machines only (FR-009, confirmed Q4), **trusting** `<ip>`, skipping an adopted machine without one into `skipped(no_ip)` so the caller can tell "no adopted machine at all" from "adopted machines with no address" (FR-013)
-- [ ] T012 Delete the private parser from `src/cuemspowerbridge/network_map.py` — `NS`, `_text`, the `Node` dataclass with its `node_type` field, `parse()`'s ElementTree scan, `slave_avahi_names()`, `slave_ips()` — and rewrite the module docstring, removing the retired vocabulary at `:5,9,58-59,120`
-- [ ] T013 Derive the library's `config_dir` from `settings_xml_path` in `src/cuemspowerbridge/config.py`, and raise `TopologyError(config_dir_mismatch)` when `network_map_path` is not in that directory (research R2)
-- [ ] T014a Bound the `cuemsutils` logger in `src/cuemspowerbridge/network_map.py` (or the daemon's logging setup) so the library's per-call DEBUG records cannot flood the controller's journal when the bridge runs at DEBUG — research R2a finding 2; topology reads now also happen on the auto-load retry loop
-- [ ] T014 [P] Test the adapter in `tests/test_network_map_adapter.py` against the Phase-1 fixtures: both resolution policies, the absent-`adopted` default, every `Skip` reason, the `partial` flag, and one test per `TopologyError` kind — explicitly including `self_entry_missing` (FR-019) and `config_dir_mismatch`
-- [ ] T014b [P] Assert in `tests/test_network_map_adapter.py` that a `cuemsutils` DEBUG record does not propagate to the bridge's root logger at the bridge's own level (T014a)
-- [ ] T015 [P] Assert message **content** in `tests/test_network_map_adapter.py`: every `TopologyError` names the offending path or machine and an actionable remedy; `network_map_retired_vocabulary` names `cuems-migrate-network-map`; `settings_xml_missing` names the package that provides the file (FR-026, SC-003, SC-014)
-- [ ] T016 [P] Rewrite `tests/test_network_map_ips.py` onto the schema-valid fixtures in both vocabularies — the current-vocabulary one asserting correct selection, the retired-vocabulary one asserting the load **raises** (FR-020)
+- [X] T006 Add `NodeView` to `src/cuemspowerbridge/network_map.py` per [data-model.md](./data-model.md) §2.1 — `uuid`, `role` (imported `NodeRole`), `adopted` (**absent ⇒ `False`**, research R3), `role_id`/`alias`/`hostname`, `ip`, derived `avahi`, `is_self`; **no `node_type` attribute exists**
+- [X] T007 Add `Selection` and `Skip` to `src/cuemspowerbridge/network_map.py` per [data-model.md](./data-model.md) §2.2 — `mode`, `partial`, `targets`, `found`, `adopted_count`, `skipped`; invariant: `targets ∪ skipped` is the full non-self machine set
+- [X] T008 Add `TopologyError` with its seven `kind` values to `src/cuemspowerbridge/network_map.py` per [data-model.md](./data-model.md) §2.3, each message naming the offending document or machine **and a remedy** (FR-026); it MUST never be converted into an empty `Selection`
+- [X] T009 Implement the loader in `src/cuemspowerbridge/network_map.py`: build `ConfigManager(config_dir=…, load_all=False)`, call `load_network_map()`, unwrap `["node_list"]`'s `{"node": …}` wrappers into `NodeView`s, and classify every library failure into a `TopologyError` kind (research R2)
+- [X] T010 Implement `shutdown_targets(..., include_unadopted: bool)` in `src/cuemspowerbridge/network_map.py` (research R4) — preserving the avahi policy verbatim (`role_id → alias → hostname`, **never** `<ip>`, unresolvable machines reported in `skipped`), setting `partial=True` when some machine that should have been targeted is unresolvable (FR-025), and returning an empty target set with `adopted_count > 0` when **none** is addressable so the caller can raise Case 3b
+- [X] T011 Implement `readiness_peers(...)` in `src/cuemspowerbridge/network_map.py` — adopted machines only (FR-009, confirmed Q4), **trusting** `<ip>`, skipping an adopted machine without one into `skipped(no_ip)` so the caller can tell "no adopted machine at all" from "adopted machines with no address" (FR-013)
+- [X] T012 Delete the private parser from `src/cuemspowerbridge/network_map.py` — `NS`, `_text`, the `Node` dataclass with its `node_type` field, `parse()`'s ElementTree scan, `slave_avahi_names()`, `slave_ips()` — and rewrite the module docstring, removing the retired vocabulary at `:5,9,58-59,120`
+- [X] T013 Derive the library's `config_dir` from `settings_xml_path` in `src/cuemspowerbridge/config.py`, and raise `TopologyError(config_dir_mismatch)` when `network_map_path` is not in that directory (research R2)
+- [X] T014a Bound the `cuemsutils` logger in `src/cuemspowerbridge/network_map.py` (or the daemon's logging setup) so the library's per-call DEBUG records cannot flood the controller's journal when the bridge runs at DEBUG — research R2a finding 2; topology reads now also happen on the auto-load retry loop
+- [X] T014 [P] Test the adapter in `tests/test_network_map_adapter.py` against the Phase-1 fixtures: both resolution policies, the absent-`adopted` default, every `Skip` reason, the `partial` flag, and one test per `TopologyError` kind — explicitly including `self_entry_missing` (FR-019) and `config_dir_mismatch`
+- [X] T014b [P] Assert in `tests/test_network_map_adapter.py` that a `cuemsutils` DEBUG record does not propagate to the bridge's root logger at the bridge's own level (T014a)
+- [X] T015 [P] Assert message **content** in `tests/test_network_map_adapter.py`: every `TopologyError` names the offending path or machine and an actionable remedy; `network_map_retired_vocabulary` names `cuems-migrate-network-map`; `settings_xml_missing` names the package that provides the file (FR-026, SC-003, SC-014)
+- [X] T016 [P] Rewrite `tests/test_network_map_ips.py` onto the schema-valid fixtures in both vocabularies — the current-vocabulary one asserting correct selection, the retired-vocabulary one asserting the load **raises** (FR-020)
 
 **Checkpoint**: the adapter is the only reader in the package, tested by content as well as by shape, with no retired vocabulary left in it.
 
@@ -91,22 +91,22 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 
 ### Tests for User Story 1
 
-- [ ] T017 [P] [US1] Add `tests/test_shutdown_cases.py` covering the six cases end-to-end through `handle_shutdown`: Case 1 proceeds (`controller_only`), Case 2 targets adopted only, Case 3 refuses `409 no_adopted_nodes`, Case 4 under `force=1` targets every machine, Case 5 refuses `503 topology_unreadable`
-- [ ] T018 [P] [US1] Assert Case 3b in `tests/test_shutdown_cases.py` — adopted machines all unresolvable ⇒ `409 no_resolvable_nodes`, **with and without `force=1`**, naming every unresolvable machine (FR-010, SC-013)
-- [ ] T019 [P] [US1] Assert Case 5 in `tests/test_shutdown_cases.py` is refused **with and without `force=1`** (FR-011)
-- [ ] T020 [P] [US1] Assert partial resolution in `tests/test_shutdown_cases.py` against `map-partial-resolve` — the shutdown proceeds, each unresolvable machine is logged at ERROR, and `node_selection.partial` is `true` (FR-025)
-- [ ] T021 [P] [US1] Assert in `tests/test_shutdown_cases.py` that Cases 3, 3b and 5 never reach `arming-shelly` — no SSH fan-out, no Shelly call, state returns to `idle` (Principle I)
-- [ ] T022 [P] [US1] Assert in `tests/test_shutdown_cases.py` that the reachability poll runs whenever targets exist, including a list shorter than `found` (FR-012, Principle II)
+- [X] T017 [P] [US1] Add `tests/test_shutdown_cases.py` covering the six cases end-to-end through `handle_shutdown`: Case 1 proceeds (`controller_only`), Case 2 targets adopted only, Case 3 refuses `409 no_adopted_nodes`, Case 4 under `force=1` targets every machine, Case 5 refuses `503 topology_unreadable`
+- [X] T018 [P] [US1] Assert Case 3b in `tests/test_shutdown_cases.py` — adopted machines all unresolvable ⇒ `409 no_resolvable_nodes`, **with and without `force=1`**, naming every unresolvable machine (FR-010, SC-013)
+- [X] T019 [P] [US1] Assert Case 5 in `tests/test_shutdown_cases.py` is refused **with and without `force=1`** (FR-011)
+- [X] T020 [P] [US1] Assert partial resolution in `tests/test_shutdown_cases.py` against `map-partial-resolve` — the shutdown proceeds, each unresolvable machine is logged at ERROR, and `node_selection.partial` is `true` (FR-025)
+- [X] T021 [P] [US1] Assert in `tests/test_shutdown_cases.py` that Cases 3, 3b and 5 never reach `arming-shelly` — no SSH fan-out, no Shelly call, state returns to `idle` (Principle I)
+- [X] T022 [P] [US1] Assert in `tests/test_shutdown_cases.py` that the reachability poll runs whenever targets exist, including a list shorter than `found` (FR-012, Principle II)
 
 ### Implementation for User Story 1
 
-- [ ] T023 [US1] Replace the target build at `src/cuemspowerbridge/bridge.py:391` with `shutdown_targets(...)`, passing `include_unadopted=force`, and log the selection: targeted, plus every skipped machine with its reason (unresolvable at ERROR)
-- [ ] T024 [US1] Implement the Case 3 refusal in `handle_shutdown` (`src/cuemspowerbridge/bridge.py:348-382`) — `409 no_adopted_nodes` with `found` and `skipped` in the body, per [contracts/http-shutdown.md](./contracts/http-shutdown.md)
-- [ ] T025 [US1] Implement the Case 3b refusal in `handle_shutdown` (`src/cuemspowerbridge/bridge.py:348-382`) — `409 no_resolvable_nodes` with `found` and `unresolvable`, **not overridable by `force`**
-- [ ] T026 [US1] Implement the Case 5 refusal in `handle_shutdown` (`src/cuemspowerbridge/bridge.py:348-382`) — `503 topology_unreadable` with the `TopologyError.kind` as `detail`, **not overridable by `force`**
-- [ ] T027 [US1] Remove the `if resolved:` guard at `src/cuemspowerbridge/bridge.py:431` so the reachability poll runs on every proceeding shutdown; in Case 1 log explicitly that there is nothing to poll rather than leaving silence (Principle II)
-- [ ] T028 [US1] Carry `selection_mode` and `partial` through `_run_shutdown` and expose the `node_selection` object in `_status_payload` — `src/cuemspowerbridge/bridge.py:144-165, 386+` (FR-014, FR-025)
-- [ ] T029 [US1] Verify in `src/cuemspowerbridge/bridge.py` and `tests/test_bridge_poweron.py` that no existing reason token, status code or `/status` key changed meaning — `cuems-displays-on` parses `GET /status`, Companion posts the transport endpoints (Principle VII)
+- [X] T023 [US1] Replace the target build at `src/cuemspowerbridge/bridge.py:391` with `shutdown_targets(...)`, passing `include_unadopted=force`, and log the selection: targeted, plus every skipped machine with its reason (unresolvable at ERROR)
+- [X] T024 [US1] Implement the Case 3 refusal in `handle_shutdown` (`src/cuemspowerbridge/bridge.py:348-382`) — `409 no_adopted_nodes` with `found` and `skipped` in the body, per [contracts/http-shutdown.md](./contracts/http-shutdown.md)
+- [X] T025 [US1] Implement the Case 3b refusal in `handle_shutdown` (`src/cuemspowerbridge/bridge.py:348-382`) — `409 no_resolvable_nodes` with `found` and `unresolvable`, **not overridable by `force`**
+- [X] T026 [US1] Implement the Case 5 refusal in `handle_shutdown` (`src/cuemspowerbridge/bridge.py:348-382`) — `503 topology_unreadable` with the `TopologyError.kind` as `detail`, **not overridable by `force`**
+- [X] T027 [US1] Remove the `if resolved:` guard at `src/cuemspowerbridge/bridge.py:431` so the reachability poll runs on every proceeding shutdown; in Case 1 log explicitly that there is nothing to poll rather than leaving silence (Principle II)
+- [X] T028 [US1] Carry `selection_mode` and `partial` through `_run_shutdown` and expose the `node_selection` object in `_status_payload` — `src/cuemspowerbridge/bridge.py:144-165, 386+` (FR-014, FR-025)
+- [X] T029 [US1] Verify in `src/cuemspowerbridge/bridge.py` and `tests/test_bridge_poweron.py` that no existing reason token, status code or `/status` key changed meaning — `cuems-displays-on` parses `GET /status`, Companion posts the transport endpoints (Principle VII)
 
 **Checkpoint**: US1 is independently shippable — power-off is correct on a converted map, refuses rather than guessing, and says when it did less than the map implies.
 
@@ -120,18 +120,18 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 
 ### Tests for User Story 2
 
-- [ ] T030 [P] [US2] Extend `tests/test_autoload.py`: with two adopted machines carrying `<ip>`, the gate waits for both and names them
-- [ ] T031 [P] [US2] Extend `tests/test_autoload.py`: with no adopted machine at all, the settle path is taken and reported as a standalone cluster (FR-013)
-- [ ] T032 [P] [US2] Cover the defensive no-address branch in `tests/test_network_map_adapter.py` by constructing that state directly — the schema makes `<ip>` mandatory, so it is unreachable through a document fixture (research R11); assert it settles with a WARNING naming the machines and does NOT report a standalone cluster (FR-013, Principle IV)
-- [ ] T033 [P] [US2] Extend `tests/test_autoload.py`: a `TopologyError` disables auto-load with a reported failure and does **not** fall through to the settle path
-- [ ] T034 [P] [US2] Extend `tests/test_autoload.py`: an unadopted machine is never waited for and is named as skipped (FR-009, Q4)
+- [X] T030 [P] [US2] Extend `tests/test_autoload.py`: with two adopted machines carrying `<ip>`, the gate waits for both and names them
+- [X] T031 [P] [US2] Extend `tests/test_autoload.py`: with no adopted machine at all, the settle path is taken and reported as a standalone cluster (FR-013)
+- [X] T032 [P] [US2] Cover the defensive no-address branch in `tests/test_network_map_adapter.py` by constructing that state directly — the schema makes `<ip>` mandatory, so it is unreachable through a document fixture (research R11); assert it settles with a WARNING naming the machines and does NOT report a standalone cluster (FR-013, Principle IV)
+- [X] T033 [P] [US2] Extend `tests/test_autoload.py`: a `TopologyError` disables auto-load with a reported failure and does **not** fall through to the settle path
+- [X] T034 [P] [US2] Extend `tests/test_autoload.py`: an unadopted machine is never waited for and is named as skipped (FR-009, Q4)
 
 ### Implementation for User Story 2
 
-- [ ] T035 [US2] Replace `_slave_ips_cached` (`src/cuemspowerbridge/bridge.py:575-593`) with an mtime-keyed cache over the adapter's load, keyed on **both** `network_map.xml` and `settings.xml`, running in an executor (research R5)
-- [ ] T036 [US2] Rewrite `_expected_node_ips` (`src/cuemspowerbridge/bridge.py:594-616`) onto `readiness_peers(...)`, keeping the `auto_load_node_ids` subset behaviour and its warn-once on an unknown id
-- [ ] T037 [US2] Implement the three-state gate at `src/cuemspowerbridge/bridge.py:652` — standalone (settle, reported), adopted-but-address-less (settle with WARNING naming them), read failed (do not settle, report) — each with a distinct log line (FR-013, FR-004)
-- [ ] T038 [US2] Surface auto-load's topology failure in `/status.node_selection` (`read_ok: false`, `read_error`) in `src/cuemspowerbridge/bridge.py:144-165, 618+`
+- [X] T035 [US2] Replace `_slave_ips_cached` (`src/cuemspowerbridge/bridge.py:575-593`) with an mtime-keyed cache over the adapter's load, keyed on **both** `network_map.xml` and `settings.xml`, running in an executor (research R5)
+- [X] T036 [US2] Rewrite `_expected_node_ips` (`src/cuemspowerbridge/bridge.py:594-616`) onto `readiness_peers(...)`, keeping the `auto_load_node_ids` subset behaviour and its warn-once on an unknown id
+- [X] T037 [US2] Implement the three-state gate at `src/cuemspowerbridge/bridge.py:652` — standalone (settle, reported), adopted-but-address-less (settle with WARNING naming them), read failed (do not settle, report) — each with a distinct log line (FR-013, FR-004)
+- [X] T038 [US2] Surface auto-load's topology failure in `/status.node_selection` (`read_ok: false`, `read_error`) in `src/cuemspowerbridge/bridge.py:144-165, 618+`
 
 **Checkpoint**: US2 is independently shippable and verified separately from US1.
 

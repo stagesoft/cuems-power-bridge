@@ -9,6 +9,7 @@ replaced with lightweight fakes; the NNG-hub wait is disabled
 (auto_load_wait_nodes=False) so these focus on the load/arm classification."""
 
 import asyncio
+from pathlib import Path
 
 from cuemspowerbridge.bridge import Bridge
 from cuemspowerbridge.config import Config
@@ -60,8 +61,18 @@ class FakeEditor:
         self.stopped = True
 
 
-def _bridge(*, armed_timeout=1, editor_resp=None):
+FIXTURES = Path(__file__).parent / "fixtures" / "network_map"
+
+
+def _bridge(*, armed_timeout=1, editor_resp=None, case="map-controller-only"):
     cfg = Config()
+    # A real, schema-valid topology. Before feature 001 these tests ran against
+    # a non-existent /etc/cuems/network_map.xml and passed, because the parser
+    # swallowed FileNotFoundError and returned []: auto-load then took the
+    # single-controller path and loaded the show on a host with no topology at
+    # all. That silence is what this feature removes.
+    cfg.network_map_path = str(FIXTURES / case / "network_map.xml")
+    cfg.settings_xml_path = str(FIXTURES / case / "settings.xml")
     cfg.auto_load_project = "uuid-x"
     cfg.auto_load_wait_nodes = False          # skip the NNG-hub wait
     cfg.auto_load_node_settle_s = 0
@@ -178,32 +189,47 @@ def test_disconnect_resets_projector_debounce():
     assert b._last_projector_on_monotonic == 0.0
 
 
-def test_slave_ips_cache_reparses_on_mtime_change(tmp_path, monkeypatch):
-    # Fix(efficiency): repeated resolutions reuse the parse; a changed mtime
-    # (operator edit) forces a reparse.
+def test_topology_cache_reparses_on_mtime_change(tmp_path, monkeypatch):
+    # Repeated resolutions reuse the read (which now schema-validates, so it is
+    # strictly more expensive than the ElementTree parse it replaced); a changed
+    # mtime on EITHER document (operator edit mid-recovery) forces a re-read.
     from cuemspowerbridge import network_map
     calls = {"n": 0}
 
-    def fake_slave_ips(path):
+    def fake_load_nodes(settings_path, map_path):
         calls["n"] += 1
-        return [("10.0.0.1", "node01")]
+        return []
 
-    monkeypatch.setattr(network_map, "slave_ips", fake_slave_ips)
+    monkeypatch.setattr(network_map, "load_nodes", fake_load_nodes)
+    monkeypatch.setattr(
+        network_map, "readiness_peers",
+        lambda s, m, nodes=None: network_map.Selection(mode="adopted"),
+    )
     p = tmp_path / "network_map.xml"
     p.write_text("<a/>")
+    settings = tmp_path / "settings.xml"
+    settings.write_text("<a/>")
     b = _bridge()
     b.cfg.network_map_path = str(p)
+    b.cfg.settings_xml_path = str(settings)
 
     asyncio.run(b._expected_node_ips())
     asyncio.run(b._expected_node_ips())
     assert calls["n"] == 1  # second call served from cache
 
-    # Bump mtime → reparse.
+    # Bump mtime → re-read.
     import os
     st = p.stat()
     os.utime(p, (st.st_atime, st.st_mtime + 10))
     asyncio.run(b._expected_node_ips())
     assert calls["n"] == 2
+
+    # The identity document participates in the answer, so it participates in
+    # the cache key too.
+    st = settings.stat()
+    os.utime(settings, (st.st_atime, st.st_mtime + 10))
+    asyncio.run(b._expected_node_ips())
+    assert calls["n"] == 3
 
 
 def test_stop_cancels_inflight_auto_load_task():

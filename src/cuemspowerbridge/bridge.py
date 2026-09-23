@@ -110,10 +110,13 @@ class Bridge:
         self._auto_load_unix_name: str | None = None  # our own driven project's load name
         self._auto_load_ids_warned = False
         self._autoload_pending: list[str] = []  # role_ids still off the bus (degraded)
-        # network_map.xml parse cache, keyed on (path, mtime): retries reuse it,
-        # but an operator editing a stale <ip> mid-recovery bumps mtime → reparse.
-        self._slave_ips_cache: list[tuple[str, str]] | None = None
-        self._slave_ips_cache_key: tuple[str, float | None] | None = None
+        # Topology cache, keyed on the mtimes of BOTH documents the library
+        # reads (network_map.xml and settings.xml): retries reuse it, but an
+        # operator editing either one mid-recovery bumps mtime → re-read.
+        self._topology_cache: list[network_map.NodeView] | None = None
+        self._topology_cache_key: tuple | None = None
+        # Last selection, for /status. `None` until the first read is attempted.
+        self._node_selection: dict[str, Any] | None = None
         self._state = "idle"
         self._state_since = _now()
         self._nodes_pending: list[str] = []
@@ -155,6 +158,14 @@ class Bridge:
             # button confirm a /setnextcue selection took effect.
             "nextcue": self.engine.nextcue,
             "shelly_timer_armed_s": self.cfg.shelly_safety_timer_s,
+            # Which nodes the last topology read selected, and why it looks the
+            # way it does. Lets a monitor tell a controller-only cluster from an
+            # unreadable map WITHOUT triggering a shutdown to find out.
+            "node_selection": self._node_selection or {
+                "mode": "none", "found": 0, "adopted": 0, "targeted": 0,
+                "partial": False, "skipped": [], "source": self.cfg.network_map_path,
+                "read_ok": None, "read_error": None,
+            },
             "last_error": self._last_error,
             "displays": self.displays.snapshot(),
             # Brightness presets — NEW top-level keys (NOT inside `displays`, whose
@@ -172,8 +183,12 @@ class Bridge:
         return request.headers.get("X-Auth-Token", "") == self.cfg.shared_token
 
     @staticmethod
-    def _err(reason: str, status: int) -> web.Response:
-        return web.json_response({"ok": False, "reason": reason}, status=status)
+    def _err(reason: str, status: int, **extra: Any) -> web.Response:
+        """Refusal envelope. `extra` carries the detail a refusal needs to be
+        actionable without reading the journal (found/skipped/unresolvable)."""
+        body: dict[str, Any] = {"ok": False, "reason": reason}
+        body.update(extra)
+        return web.json_response(body, status=status)
 
     @staticmethod
     def _ok(extra: dict | None = None) -> web.Response:
@@ -364,8 +379,63 @@ class Bridge:
                     log.info("refuse_if_running: project running, 409")
                     self._set_state("idle", error="project_running")
                     return self._err("project_running", 409)
+            # Topology first: every refusal below happens BEFORE the SSH
+            # fan-out, before the reachability poll and before the Shelly is
+            # armed. A shutdown that cannot name its targets never starts.
             try:
-                await self._run_shutdown()
+                nodes = await self._topology()
+                selection = network_map.shutdown_targets(
+                    self.cfg.settings_xml_path, self.cfg.network_map_path,
+                    include_unadopted=force, nodes=nodes,
+                )
+            except network_map.TopologyError as e:
+                # Case 5. `force` does NOT override this: it overrides policy,
+                # never evidence. A read that failed produced no knowledge of
+                # the cluster, so there is no basis to power anything off.
+                log.error("shutdown REFUSED: %s", e)
+                self._record_read_failure(e)
+                self._set_state("idle", error=f"topology_unreadable:{e.kind.value}")
+                return self._err("topology_unreadable", 503, detail=e.kind.value)
+
+            for skip in selection.unresolvable:
+                log.error(
+                    "network_map: node %s (uuid=%s) has no role_id/alias/hostname; "
+                    "it cannot be commanded off", skip.label, skip.uuid,
+                )
+
+            if selection.found and not selection.targets:
+                if selection.adopted_count == 0 and not force:
+                    # Case 3: the map says this cluster has machines, none of
+                    # them adopted. Refuse rather than cut mains over them.
+                    names = [k.label for k in selection.skipped]
+                    log.error(
+                        "shutdown REFUSED: %d node(s) in %s, none adopted: %s. "
+                        "Adopt them, or repeat with force=1 to power off every "
+                        "node in the map.",
+                        selection.found, self.cfg.network_map_path, ", ".join(names),
+                    )
+                    self._record_selection(selection, 0)
+                    self._set_state("idle", error="no_adopted_nodes")
+                    return self._err("no_adopted_nodes", 409,
+                                     found=selection.found, skipped=names)
+                # Case 3b: nodes would be targeted but not one is addressable.
+                # Not overridable by force — an unreachable node cannot be
+                # commanded off by asserting harder.
+                uuids = [k.uuid for k in selection.unresolvable]
+                log.error(
+                    "shutdown REFUSED: none of the %d node(s) to power off is "
+                    "addressable (no role_id/alias/hostname): %s. Give each one a "
+                    "name in %s.",
+                    len(uuids), ", ".join(uuids), self.cfg.network_map_path,
+                )
+                self._record_selection(selection, 0)
+                self._set_state("idle", error="no_resolvable_nodes")
+                return self._err("no_resolvable_nodes", 409,
+                                 found=selection.found, unresolvable=uuids)
+
+            self._record_selection(selection, len(selection.targets))
+            try:
+                await self._run_shutdown(selection)
                 # If _run_shutdown returned without raising, poweroff was
                 # issued. Status stays at "poweroff-issued" until the
                 # process gets SIGTERM'd by systemd.
@@ -381,24 +451,88 @@ class Bridge:
                 self._set_state("failed", error=str(e))
                 return self._err("internal_error", 500)
 
+
+    # ------------------- topology -------------------
+
+    def _topology_key(self) -> tuple:
+        """Cache key: the mtime of both documents the library reads."""
+        key = []
+        for path in (self.cfg.network_map_path, self.cfg.settings_xml_path):
+            try:
+                key.append((path, os.stat(path).st_mtime))
+            except OSError:
+                key.append((path, None))
+        return tuple(key)
+
+    def _load_topology_blocking(self) -> list[network_map.NodeView]:
+        """Read + schema-validate the topology. Runs in an executor: this is
+        strictly more work than the ElementTree parse it replaces, and the
+        auto-load retry loop calls it too."""
+        key = self._topology_key()
+        if self._topology_cache is not None and self._topology_cache_key == key:
+            return self._topology_cache
+        nodes = network_map.load_nodes(
+            self.cfg.settings_xml_path, self.cfg.network_map_path
+        )
+        self._topology_cache = nodes
+        self._topology_cache_key = key
+        return nodes
+
+    async def _topology(self) -> list[network_map.NodeView]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._load_topology_blocking)
+
+    def _record_selection(self, sel: network_map.Selection, targeted: int) -> None:
+        self._node_selection = {
+            "mode": sel.mode,
+            "found": sel.found,
+            "adopted": sel.adopted_count,
+            "targeted": targeted,
+            "partial": sel.partial,
+            "skipped": [{"node": k.label, "reason": k.reason.value} for k in sel.skipped],
+            "source": self.cfg.network_map_path,
+            "read_ok": True,
+            "read_error": None,
+        }
+
+    def _record_read_failure(self, err: network_map.TopologyError) -> None:
+        self._node_selection = {
+            "mode": "none", "found": 0, "adopted": 0, "targeted": 0,
+            "partial": False, "skipped": [],
+            "source": self.cfg.network_map_path,
+            "read_ok": False, "read_error": err.kind.value,
+        }
+
     # ------------------- shutdown coordinator -------------------
 
-    async def _run_shutdown(self) -> None:
+    async def _run_shutdown(self, selection: network_map.Selection) -> None:
         # Step 4 (unload) intentionally omitted: engine WS dispatcher has
         # no /engine/command/unload handler. See plan.
 
-        # Step 5: build node target list.
-        resolved, unresolvable = network_map.slave_avahi_names(
-            self.cfg.network_map_path
-        )
-        for n in unresolvable:
-            log.error(
-                "network_map: node uuid=%s has no role_id/alias/hostname; "
-                "skipping (it will not poweroff cleanly)", n.uuid,
-            )
+        # Step 5: the target list, already decided and vetted by the caller.
+        resolved = list(selection.targets)
         self._nodes_pending = list(resolved)
-        log.info("shutdown: %d nodes to power off: %s",
-                 len(resolved), ", ".join(resolved) if resolved else "(none)")
+        if selection.mode == "controller_only":
+            # Case 1: the map was read and it says this cluster is one machine.
+            # An ANSWER, not an anomaly — and said out loud, because "no nodes
+            # to power off" must never be silence.
+            log.info("shutdown: controller-only cluster (%s lists no other node) "
+                     "— no node poweroff, nothing to wait for",
+                     self.cfg.network_map_path)
+        else:
+            log.info("shutdown: %d node(s) to power off (%s): %s",
+                     len(resolved), selection.mode, ", ".join(resolved))
+            if selection.partial:
+                log.error(
+                    "shutdown: PARTIAL selection — %d of %d adopted node(s) could "
+                    "not be addressed and will stay up when mains is cut: %s",
+                    len(selection.unresolvable), selection.adopted_count,
+                    ", ".join(k.uuid for k in selection.unresolvable),
+                )
+            skipped = [f"{k.label}({k.reason.value})" for k in selection.skipped]
+            if skipped:
+                log.info("shutdown: skipping %d node(s): %s",
+                         len(skipped), ", ".join(skipped))
 
         # Step 6: SSH-fanout poweroff.
         targets = [
@@ -428,6 +562,12 @@ class Bridge:
             )
 
         # Step 7: reachability poll (projectors power off in parallel).
+        #
+        # This runs whenever the sequence proceeds with targets, including a
+        # list shorter than the map implies. It used to be guarded by
+        # `if resolved:`, which meant that the one case where the target list
+        # was wrong — empty — also skipped the check that would have caught it.
+        # A verification step does not get to opt out on the anomalous path.
         if resolved:
             self._set_state("polling")
             result = await wait_until_all_down(
@@ -442,6 +582,10 @@ class Bridge:
                     "with stuck hosts: %s", result.elapsed_s,
                     ", ".join(result.stuck_hosts),
                 )
+        else:
+            # Only reachable in Case 1 (the caller refuses every other empty
+            # selection). Stated rather than silent.
+            log.info("shutdown: no nodes to poll (controller-only cluster)")
 
         # Join the projector power-off, bounded so a hung projector cannot
         # stall the sequence (cap = its full retry budget + margin).
@@ -572,46 +716,39 @@ class Bridge:
             and load != self._auto_load_unix_name
         )
 
-    def _slave_ips_cached(self, path: str) -> list[tuple[str, str]]:
-        """network_map.slave_ips(path) with an mtime-keyed cache.
-
-        Runs in a worker thread (run_in_executor); only the serialized
-        auto-load loop ever touches the cache attrs, so no locking is needed.
-        A changed mtime (operator edited network_map.xml mid-recovery) forces a
-        reparse; otherwise repeated retries reuse the prior result."""
-        try:
-            mtime: float | None = os.stat(path).st_mtime
-        except OSError:
-            mtime = None
-        key = (path, mtime)
-        if self._slave_ips_cache is not None and self._slave_ips_cache_key == key:
-            return self._slave_ips_cache
-        result = network_map.slave_ips(path)
-        self._slave_ips_cache = result
-        self._slave_ips_cache_key = key
-        return result
-
     async def _expected_node_ips(self) -> list[tuple[str, str]]:
         """Resolve (ip, role_id) of the node-engines we must wait for.
 
-        Default = every adopted slave with an ``<ip>``. If
-        ``auto_load_node_ids`` is set, restrict to that subset (warn once on
-        any id not present in the map — validate() can't see network_map)."""
-        loop = asyncio.get_event_loop()
-        slaves = await loop.run_in_executor(
-            None, self._slave_ips_cached, self.cfg.network_map_path
+        Adopted nodes carrying an <ip>. If ``auto_load_node_ids`` is set,
+        restrict to that subset (warn once on any id not present in the map —
+        validate() cannot see network_map).
+
+        Raises TopologyError: auto-load must NOT fall through to the
+        single-controller settle path because a read failed. That branch is for
+        a map that genuinely lists no other node.
+        """
+        nodes = await self._topology()
+        sel = network_map.readiness_peers(
+            self.cfg.settings_xml_path, self.cfg.network_map_path, nodes=nodes,
         )
+        for skip in sel.skipped:
+            if skip.reason is network_map.SkipReason.NO_IP:
+                log.warning("auto-load: adopted node %s has no <ip>; cannot wait "
+                            "for it on the hub", skip.label)
+        self._record_selection(sel, len(sel.targets))
+        peers = list(sel.targets)
+
         wanted = self.cfg.node_ids_list()
         if not wanted:
-            return slaves
-        by_id = {label: ip for ip, label in slaves}
+            return peers
+        by_id = {label: ip for ip, label in peers}
         result: list[tuple[str, str]] = []
         for rid in wanted:
             if rid in by_id:
                 result.append((by_id[rid], rid))
             elif not self._auto_load_ids_warned:
                 log.warning("auto-load: auto_load_node_ids id %r not found in "
-                            "network_map (no <ip> to wait for)", rid)
+                            "network_map (no adopted node with that id)", rid)
         self._auto_load_ids_warned = True
         return result
 
@@ -622,7 +759,16 @@ class Bridge:
         uuid = self.cfg.auto_load_project
 
         # (1) Resolve expected node IPs and (2) wait for them on the NNG hub.
-        expected = await self._expected_node_ips()
+        #
+        # A FAILED READ must not reach the single-controller branch below: that
+        # branch is for a map that genuinely lists no other node, and an
+        # unreadable map counterfeits it exactly. Report and skip this round.
+        try:
+            expected = await self._expected_node_ips()
+        except network_map.TopologyError as e:
+            self._record_read_failure(e)
+            log.error("auto-load: topology unreadable, not loading: %s", e)
+            return "skipped"
         id_by_ip = {ip: label for ip, label in expected}
         expected_ips = set(id_by_ip)
         if self.cfg.auto_load_wait_nodes and expected_ips:
@@ -649,8 +795,15 @@ class Bridge:
         else:
             self._autoload_pending = []
             if self.cfg.auto_load_wait_nodes:
-                # SINGLE-CONTROLLER CLUSTER (network_map lists no slave with an
-                # <ip>): there is no REMOTE node-engine to wait for, but this box
+                # SINGLE-CONTROLLER CLUSTER — reached only after a SUCCESSFUL
+                # read that lists no adopted node with an <ip>. The read failure
+                # that used to be indistinguishable from this is handled above.
+                # (An adopted node with no <ip> is a third, defensive state: the
+                # schema makes <ip> mandatory, so it cannot come from a valid
+                # document, and _expected_node_ips warns per node if it ever
+                # does.)
+                #
+                # There is no REMOTE node-engine to wait for, but this box
                 # still runs its own node-engine, and the engine cannot reach
                 # armed until that node's players have registered. cluster_bus
                 # can never observe it — it strips loopback and the controller's
