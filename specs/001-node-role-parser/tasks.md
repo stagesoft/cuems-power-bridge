@@ -17,6 +17,9 @@ defect — a passing suite proves nothing here unless a fixture fails against th
 **Organization**: grouped by user story. US1 (shutdown) and US2 (auto-load) fail and recover
 independently and are verified separately; either alone is a shippable improvement.
 
+**Implementation status 2026-09-23**: 54 of 60 tasks done; the 6 marked ⛔ need a build
+host or a cluster and are listed in `evidence/README.md` as pending.
+
 **Revision 2026-09-23** (post-`/speckit-analyze`): adds Case 3b coverage, the partial-
 resolution rule, the three-state readiness gate, message-content assertions, and moves the
 fixtures into `tests/fixtures/network_map/`. T014a/T014b were added after the library
@@ -149,7 +152,7 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 - [X] T042 [US3] Correct the stale docstring at `../cuems-common/usr/bin/cuems-cluster-poweroff:240` ("matches the network_map `NodeType.master` entry")
 - [X] T043 [US3] Add `Breaks: cuems-power-bridge (<< 0.3.1-1)` to `../cuems-common/debian/control`, leaving `Suggests: cuems-power-bridge` unversioned and unchanged (it must stay installable with no bridge present)
 - [X] T044 [US3] Record the cuems-common half in its open `../cuems-common/debian/changelog` entry `1.3.0-23` (UNRELEASED) rather than opening a new revision
-- [ ] T045 [US3] Rehearse the refused half-upgrade on a test host and record it in `specs/001-node-role-parser/evidence/upgrade-refusal.txt` (SC-009)
+- [ ] ⛔ BLOCKED (needs a test host with both packages built) — T045 [US3] Rehearse the refused half-upgrade on a test host and record it in `specs/001-node-role-parser/evidence/upgrade-refusal.txt` (SC-009)
 
 **Checkpoint**: the cutover is mechanical, not a note in a document.
 
@@ -173,12 +176,12 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 - [X] T050 [P] Update the five README sites carrying the retired vocabulary (`README.md:320,323,476,767,1265` — re-measure before editing)
 - [X] T051 Add the operator-facing documentation FR-024 requires to `README.md`: the **six** shutdown cases, the partial-resolution rule, both meanings of `force` and its two non-effects, and the wall-switch consequence (the shipped mJS sends `force` by default, so the physical switch powers off every machine and does not stop for a running show; `--safe` changes that) (SC-012)
 - [X] T052 [P] Add the `debian/changelog` entry for `0.3.1-1` describing the behaviour change: adoption filtering, the three new refusals, the partial marker, and the required cuems-common pairing
-- [ ] T053 Build the package and assert the shared-venv rule: `dpkg-deb -c ../cuems-power-bridge_*.deb` shows **no** `site-packages/cuemsutils` and **does** show the aiohttp stack; record in `specs/001-node-role-parser/evidence/deb-contents.txt` (FR-017, Principle VI, research R10)
-- [ ] T054 Verify the built `cuems-utils` `0.1.0rc16` `.deb` installs `/etc/cuems/settings.xml` (its packaging lives on the `debian/bookworm` branch) and record it in `specs/001-node-role-parser/evidence/settings-xml-provenance.txt`
+- [ ] ⛔ BLOCKED (this box is not a build host (dh-virtualenv, python3-dev absent); build on the controller) — T053 Build the package and assert the shared-venv rule: `dpkg-deb -c ../cuems-power-bridge_*.deb` shows **no** `site-packages/cuemsutils` and **does** show the aiohttp stack; record in `specs/001-node-role-parser/evidence/deb-contents.txt` (FR-017, Principle VI, research R10)
+- [ ] ⛔ BLOCKED (needs the cuems-utils debian/bookworm build) — T054 Verify the built `cuems-utils` `0.1.0rc16` `.deb` installs `/etc/cuems/settings.xml` (its packaging lives on the `debian/bookworm` branch) and record it in `specs/001-node-role-parser/evidence/settings-xml-provenance.txt`
 - [X] T055 Run the full suite green through the documented runner and record the final count in `specs/001-node-role-parser/evidence/final-suite.txt`
-- [ ] T056 [US1] Hardware rehearsal 1 — orderly power-off on a real cluster (`dry_run` first, then live): adopted machines go off, the poll confirms them, the Shelly arms, the controller powers off, mains cuts on an already-off box; record in `specs/001-node-role-parser/evidence/hardware-verification.md` (FR-022, SC-010)
-- [ ] T057 [US2] Hardware rehearsal 2 — cold boot with nodes powered: the gate waits for the adopted machines, the show loads and arms, and `settle=45` / `armed_timeout=125` still hold; record in `specs/001-node-role-parser/evidence/hardware-verification.md` as a **separate** run from T056 (FR-022, SC-010)
-- [ ] T058 Negative rehearsal, no cluster needed: an unconverted map makes `/shutdown` refuse `503` and leaves mains on, `force=1` included; record in `specs/001-node-role-parser/evidence/hardware-verification.md`
+- [ ] ⛔ BLOCKED (needs a real cluster) — T056 [US1] Hardware rehearsal 1 — orderly power-off on a real cluster (`dry_run` first, then live): adopted machines go off, the poll confirms them, the Shelly arms, the controller powers off, mains cuts on an already-off box; record in `specs/001-node-role-parser/evidence/hardware-verification.md` (FR-022, SC-010)
+- [ ] ⛔ BLOCKED (needs a real cluster) — T057 [US2] Hardware rehearsal 2 — cold boot with nodes powered: the gate waits for the adopted machines, the show loads and arms, and `settle=45` / `armed_timeout=125` still hold; record in `specs/001-node-role-parser/evidence/hardware-verification.md` as a **separate** run from T056 (FR-022, SC-010)
+- [ ] ⛔ BLOCKED (needs a built package on a test host) — T058 Negative rehearsal, no cluster needed: an unconverted map makes `/shutdown` refuse `503` and leaves mains on, `force=1` included; record in `specs/001-node-role-parser/evidence/hardware-verification.md`
 
 ---
 
