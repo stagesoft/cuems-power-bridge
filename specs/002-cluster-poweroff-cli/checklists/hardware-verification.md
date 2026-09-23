@@ -1,6 +1,8 @@
 # Hardware & manual verification ledger — features 001 and 002
 
-**Created 2026-09-23 (feature 002 — FR-021a, SC-011).** One place for every check that needs
+**Created 2026-09-23 (feature 002 — FR-021a, SC-011); expanded the same day** after two
+analysis passes and three design decisions (the shared code is the two stage bodies, the helper
+is internal, the running-show guard is requested and manual-only). One place for every check that needs
 real hardware, a real cluster or a human, for **both** features, so the debt is countable
 instead of spread across a task list and an evidence README.
 
@@ -25,7 +27,11 @@ the difference between "the power-off works" and "the power-off reports that it 
 
 1. §1–§2 before upgrading (they capture the *old* behaviour, and cannot be redone after).
 2. §3–§6 after the candidate is installed.
-3. §7–§9 are the power-off rehearsals proper; do them last, and expect the machine to go down.
+3. §13's "before" capture belongs with step 1 — the old host-key store cannot be read back
+   after the first post-upgrade power-off.
+4. §7–§14 are the power-off rehearsals proper; do them last, and expect the machine to go
+   down. **§11 is the one that matters most**: a power-off during a playing show must complete
+   through every trigger the product uses.
 
 ---
 
@@ -119,8 +125,8 @@ leave mains on.
 
 **Do**: with the candidate installed, flip the physical switch on a real cluster. Compare the
 journal against a pre-upgrade power-off: same machines, same order, same decisions — the only
-difference being that the lines now come from `cuems-power-bridge-cluster-poweroff` instead of
-the heredoc.
+difference being that the lines now come from the module the wrapper invokes
+(`"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff`) instead of the heredoc.
 
 **Proves**: the governing constraint of feature 002 — *the systemd + Shelly path is the
 product and must not change*. This is the check the whole feature is measured against.
@@ -136,25 +142,41 @@ systemd, with the daemon already stopped. That combination cannot be simulated.
 (after boot) through `POST /shutdown`. Diff the two journals' selection lines.
 
 **Proves**: the de-duplication held where it matters. The automated equivalence test compares
-decisions in-process; this compares them across two processes, two identities (root vs
-`cuems`) and two `known_hosts` stores.
+decisions in-process; this compares them across two processes and two identities (root vs
+`cuems`) — now sharing one host-key store (§13).
 
 **Why the suite cannot**: one of the two callers only ever runs as root during a transition.
 
-## 9. Feature 002 — the manual tool, on a controller
+## 9. Feature 002 — the manual path, on a controller
 
 - [ ] **Not performed.**
 
-**Do**: with a show playing, run `cuems-power-bridge-cluster-poweroff --stage all --dry-run`;
-confirm it refuses (exit 4). Repeat with `--force`; confirm it proceeds. Then hold the lock
-(`flock /run/cuems-power-bridge/shutdown.lock -c 'sleep 30'`) and confirm both a second CLI
-run and `POST /shutdown` refuse immediately rather than queueing. Finally `kill -9` the holder
-and confirm the next attempt proceeds.
+**Do**: with a show playing, run `cuems-cluster-poweroff --force` (the operator command —
+there is deliberately no new one). Confirm it **refuses**, names the project, and changes
+nothing. Repeat with the override and confirm it proceeds and says so in the journal. Then
+confirm the fail-open cases: stop the daemon and re-run (proceeds with a WARNING); with the
+engine wedged so `engine_state` is `unknown` (proceeds with a WARNING); with `dry_run=true`
+(guard skipped entirely).
 
-**Proves**: the two safeguards this feature adds work where they are supposed to, and — by
-`--dry-run` throughout — that they can be rehearsed without cost.
+**Proves**: the guard closes the hole on the manual path — which today blanks the fleet and
+powers the machines off mid-show with no check at all — without ever being able to reach the
+product path.
 
-**Why the suite cannot**: `flock` across two real processes, one of them the packaged daemon.
+**Why the suite cannot**: it needs a real engine playing a real project, and a daemon that can
+be stopped and wedged.
+
+## 9a. Feature 002 — the lock, across two real processes
+
+- [ ] **Not performed.**
+
+**Do**: hold it (`flock /run/cuems-power-bridge/shutdown.lock -c 'sleep 30'`), then confirm a
+wrapper run and `POST /shutdown` both refuse immediately rather than queueing. `kill -9` the
+holder and confirm the next attempt proceeds. Finally confirm the wrapper holds **one** lock
+across both stages — the gap between them is where a second power-off could otherwise start.
+
+**Proves**: FR-014 and SC-009 across processes, identities and the stage boundary.
+
+**Why the suite cannot**: `flock` between the packaged daemon and a root transition.
 
 ## 10. Feature 002 — a host with no bridge still shuts down
 
@@ -168,6 +190,67 @@ shutdown to complete normally.
 is a `Suggests:` and not a `Depends:`.
 
 **Why the suite cannot**: it tests this package; this is a check about its absence.
+
+## 11. Feature 002 — **a power-off during a show completes** (SC-014)
+
+- [ ] **Not performed.** ⚠️ **The single most important check in this ledger.**
+
+**Do**: with a project **playing**, power the venue off through each trigger the product uses,
+one per run: the **wall switch**, the **physical power button**, and `systemctl poweroff`.
+Each must complete the full sequence — displays off, machines off and confirmed, controller
+down — with nothing refusing and nothing waiting for an answer.
+
+**Proves**: the invariant this feature is governed by — *the product must always be able to
+power the venue off mid-show*, one of the wall switch's primary intents. The running-show
+guard added for manual runs must be **unreachable** from every one of these paths.
+
+**Why the suite cannot**: the guard's absence on the product path is provable by call graph
+(T020), but only hardware proves that a real switch, with a real show running, still kills the
+venue.
+
+## 12. Feature 002 — the relay is armed exactly once (SC-013)
+
+- [ ] **Not performed.**
+
+**Do**: trigger `POST /shutdown` and follow the journal through the re-entrant transition it
+causes. Confirm the relay is pre-checked and armed **once**, by the HTTP route only; that the
+wrapper's stages run on the re-entry (displays a fast no-op, machines already down); and that
+the lock does not refuse that transition.
+
+**Proves**: FR-001a and the C2 fix together — the shared code cannot arm the relay, and the
+daemon releases the lock before triggering the transition it causes.
+
+**Why the suite cannot**: re-entry only exists when systemd really powers the box off.
+
+## 13. Feature 002 — the shared host-key store, and its one-time re-learn
+
+- [ ] **Not performed.** ⚠️ **Do this deliberately, and record it.**
+
+**Do**: before the upgrade, note the contents of `/root/.ssh/known_hosts` (the transition
+path's current store). After it, confirm both initiators use
+`/var/lib/cuems/.ssh/known_hosts`, and that the first power-off through the transition
+**re-accepts** each machine's host key there under `accept-new`. Compare the re-learned keys
+against the old root store: they must match.
+
+**Proves**: FR-024. It is also the one security-relevant consequence of the change — for one
+power-off, a substituted machine would be accepted silently, so the comparison against the old
+store is the check that closes the window.
+
+**Why the suite cannot**: there is no second identity and no real host key in a test.
+
+## 14. Feature 002 — the wrapper still cannot fail a shutdown
+
+- [ ] **Not performed.**
+
+**Do**: force each failure the helper can report during a real transition — an unreadable
+topology, a refused selection, a stuck machine — and confirm the wrapper logs each and still
+**exits 0**, that stage 1 failing still continues to stage 2, and that `systemctl stop` never
+reports a failed unit.
+
+**Proves**: FR-009a. An `ExecStop` that fails must never fail the stop it belongs to, and this
+feature introduces four new non-zero statuses into that path.
+
+**Why the suite cannot**: the discipline only matters inside a real stop job.
 
 ---
 
@@ -200,10 +283,20 @@ FEATURE 002 — the product path, unchanged
   wall switch: same machines, same order (§7):           [ ] pass
       journal diff vs before-upgrade capture:            [ ] identical decisions
   wall switch vs POST /shutdown agree (§8):              [ ] pass
-  manual tool: refuses during a show, --force proceeds (§9): [ ] pass
-      lock: second run and API both refuse, no queue:    [ ] pass
-      lock released after kill -9:                       [ ] pass
+  POWER-OFF DURING A PLAYING SHOW COMPLETES (§11):
+      wall switch  [ ]    power button  [ ]    systemctl poweroff  [ ]
+  relay armed exactly once per shutdown (§12):           [ ] pass
+  wrapper exits 0 on every transaction path (§14):       [ ] pass
+      stage 1 failure still continued to stage 2:        [ ] yes
   node with no bridge still shuts down (§10):            [ ] pass
+
+FEATURE 002 — the manual path and the machinery
+  manual run refuses during a show; override proceeds (§9):   [ ] pass
+      fail-open: daemon down [ ]  engine unknown [ ]  dry_run [ ]
+  lock: second run and API both refuse, no queue (§9a):  [ ] pass
+      released after kill -9 [ ]   held across BOTH stages [ ]
+  host-key store migrated, keys re-learned and compared (§13): [ ] pass
+      old /root/.ssh/known_hosts captured beforehand:    [ ] yes
 
 notes / anything that surprised you:
 ```
