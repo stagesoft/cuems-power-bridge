@@ -71,7 +71,6 @@ under `tests/fixtures/network_map/`, containing a schema-valid `network_map.xml`
 | `map-mixed` | self + 1 adopted + 1 unadopted | Case 2 targets one, names the other in `skipped` |
 | `map-unresolvable` | self + 2 adopted, neither with `role_id`/`alias`/`hostname` | Case 3b: refused `no_resolvable_nodes`, with and without `force` |
 | `map-partial-resolve` | self + 1 adopted addressable + 1 adopted unresolvable | proceeds, `partial=true`, ERROR names the unresolvable one |
-| `map-adopted-no-ip` | self + 2 adopted, no `<ip>` | readiness gate settles **with a WARNING** naming both — not reported as standalone |
 | `map-pre007` | retired vocabulary | Case 5: load raises, classified `network_map_retired_vocabulary` |
 | `map-no-self` | no entry for this host | Case 5: `self_entry_missing` |
 | `map-incomplete` | a node missing `<mac>` | Case 5: `network_map_invalid` |
@@ -85,8 +84,9 @@ to "simplify" away:
 - a machine with none of the three is **reported unresolvable**, never dropped, and its
   `<ip>` is never used; all-unresolvable refuses (Case 3b), some-unresolvable proceeds with
   `partial=true`;
-- the readiness gate **does** use `<ip>`, and skips an adopted machine without one, with a
-  warning;
+- the readiness gate **does** use `<ip>`; its skip-with-warning for a machine without one is
+  a defensive branch (the schema makes `<ip>` mandatory, research R11) and is covered by
+  constructing that state directly, not by a document fixture;
 - an absent `adopted` element counts as not adopted.
 
 ---
@@ -108,9 +108,9 @@ Assert per [contracts/http-shutdown.md](./contracts/http-shutdown.md): the codes
 
 **Auto-load**, driven independently: with a map listing two adopted machines with `<ip>`,
 the gate waits for both; with a map listing no adopted machine at all, it takes the
-single-controller settle path and says so; with adopted machines that carry no `<ip>`, it
-settles **with a WARNING** naming them (not reported as standalone); with an unreadable
-map, it does **not** take that path and reports the failure.
+single-controller settle path and says so; with an unreadable map, it does
+**not** take that path and reports the failure. (The "adopted but address-less" state is
+unreachable through a valid document — research R11.)
 
 "The bridge works now" is not an answer to either — they are separate runs.
 

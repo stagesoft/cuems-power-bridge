@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<cms:CuemsNetworkMap xmlns:cms="https://stagelab.coop/cuems/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://stagelab.coop/cuems/ network_map.xsd">
+  <node_list>
+    <node><uuid>0367f391-ebf4-48b2-9f26-000000000001</uuid><mac>0800276db101</mac><name>0800276db101._cuems_nodeconf._tcp.local.</name><node_role>controller</node_role><ip>192.168.1.10</ip><adopted>True</adopted><online>True</online><role_id>controller</role_id></node>
+    <node><uuid>0367f391-ebf4-48b2-9f26-000000000002</uuid><mac>0800276db102</mac><name>0800276db102._cuems_nodeconf._tcp.local.</name><node_role>node</node_role><ip>192.168.1.102</ip><adopted>False</adopted><online>True</online><role_id>node01</role_id></node>
+    <node><uuid>0367f391-ebf4-48b2-9f26-000000000003</uuid><mac>0800276db103</mac><name>0800276db103._cuems_nodeconf._tcp.local.</name><node_role>node</node_role><ip>192.168.1.103</ip><online>True</online><role_id>node02</role_id></node>
+  </node_list>
+</cms:CuemsNetworkMap>

@@ -150,7 +150,7 @@ one:
 | State | What the gate does |
 |---|---|
 | Read OK, **no adopted machine at all** | Takes the single-controller settle path, reported as such. The ordinary standalone configuration. |
-| Read OK, **adopted machines exist but none carries an address** | Takes the settle path **with a WARNING** naming every adopted machine it cannot wait for. This is a misconfigured topology document, not a standalone cluster, and it must not read as one. |
+| Read OK, **adopted machines exist but none carries an address** | Takes the settle path **with a WARNING** naming every adopted machine it cannot wait for. This is a misconfigured topology document, not a standalone cluster, and it must not read as one. **Measured 2026-09-23: unreachable through a schema-valid document** — the owning schema makes the address element mandatory, so a machine without one makes the whole document invalid (Case 5) before this branch is consulted. The branch is therefore *defensive*: it is kept, it is reported if it ever fires, and it is covered at the adapter level rather than by a document fixture. |
 | **Read failed** | Does **not** take the settle path. Auto-load does not proceed on an unknown topology; the failure is reported. |
 
 ## User Scenarios & Testing *(mandatory)*
@@ -275,8 +275,9 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
 - **A machine that cannot be named**: reported as unresolvable at ERROR, never silently
   dropped, and never addressed by its raw address. Some unresolvable ⇒ the shutdown
   proceeds, marked partial; **all** unresolvable ⇒ Case 3b, refused.
-- **A machine with no address**: for the readiness gate only, such a machine is skipped
-  with a warning; it remains a shutdown target if it is adopted (or if `force` is set).
+- **A machine with no address**: the owning schema makes the address mandatory, so such a
+  machine invalidates the whole document (Case 5). The readiness gate's skip-with-warning
+  for it is kept as a defensive branch and covered at the adapter level.
 - **The controller's own entry**: the controller must never command itself off over the
   network, and must never wait to observe itself absent.
 - **An adopted machine that is already off**: it is confirmed down immediately and the
@@ -347,8 +348,9 @@ confirm it refuses it with a named, actionable error instead of quietly selectin
 - **FR-013**: The boot readiness gate MUST enter its single-controller settle path only
   after a successful read, and MUST distinguish the three states in **Boot readiness gate
   and adoption**: no adopted machine at all (settle, reported as standalone); adopted
-  machines present but none with an address (settle **with a WARNING** naming them); read
-  failed (do not settle, report).
+  machines present but none with an address (settle **with a WARNING** naming them — a
+  defensive branch, unreachable through a schema-valid document); read failed (do not
+  settle, report).
 - **FR-014**: Operator-visible status MUST expose enough state to distinguish, without
   reading the log: a normal cluster shutdown, a controller-only shutdown, a **partial**
   selection, a refusal for lack of adopted machines, a refusal for lack of addressable

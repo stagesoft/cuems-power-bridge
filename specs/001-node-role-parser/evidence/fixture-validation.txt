@@ -1,0 +1,22 @@
+# T004 — fixture validation against the owning schema (FR-020)
+# Date:   2026-09-23T08:51:03+00:00
+# Schema: ../cuems-utils/src/cuemsutils/xml/schemas/network_map.xsd (cuemsutils 0.1.0rc16)
+#
+# Command:
+#   uv run --python 3.11 --with /home/stagelab/cuems-utils --with xmlschema python \
+#     -c 'xmlschema.XMLSchema(network_map.xsd).validate(<each fixture>)'
+
+map-controller-only    VALID
+map-incomplete         INVALID (deliberately): failed validating <Element 'node' at 0x7f0b72c62610> with XsdGroup(model='sequen
+map-mixed              VALID
+map-no-self            VALID
+map-no-settings        VALID
+map-none-adopted       VALID
+map-partial-resolve    VALID
+map-pre007             INVALID (deliberately): failed validating <Element 'node' at 0x7f0b72c635b0> with XsdGroup(model='sequen
+map-two-adopted        VALID
+map-unresolvable       VALID
+
+# The two INVALID fixtures are deliberate and are the point of their cases:
+#   map-pre007      — retired <node_type> vocabulary; the load MUST raise (FR-003)
+#   map-incomplete  — node missing <mac>; the load MUST raise, not yield a partial node

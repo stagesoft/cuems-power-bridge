@@ -302,6 +302,28 @@ bundle the aiohttp stack (unique to this package).
 
 ---
 
+## R11. `<ip>` is mandatory — discovered while validating the fixtures (2026-09-23)
+
+`network_map.xsd:28` declares `ip` with `minOccurs="1"` and type `NonEmptyString`. A node
+entry **cannot** legally omit its address, so the state "adopted machines exist but none
+carries an address" cannot be produced by a schema-valid document: such a document fails
+validation and becomes Case 5 before the readiness gate is reached.
+
+**Consequences**, applied to the spec and tasks:
+
+- the `no_ip` skip in `readiness_peers()` is **defensive**, not a live path. It stays —
+  it costs nothing, and the adapter must not assume schema guarantees it cannot check —
+  but it is covered at the adapter level (constructing the state directly), not by a
+  document fixture.
+- the `map-adopted-no-ip` fixture was **deleted**: every legal shape of it is identical to
+  `map-two-adopted`, so it tested nothing.
+- the readiness gate has **two reachable states** plus one defensive one, not three.
+
+This is the *measure, do not transcribe* rule paying for itself: the three-state design
+came from analysis of the old parser's behaviour, where `<ip>` was genuinely optional.
+
+---
+
 ## Resolved unknowns
 
 | Unknown from Technical Context | Resolution |

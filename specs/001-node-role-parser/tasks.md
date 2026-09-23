@@ -51,7 +51,7 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 
 - [ ] T001 Capture the pre-migration failing run into `specs/001-node-role-parser/evidence/pre-migration-parser-failure.txt` — today's `network_map.slave_avahi_names()` / `slave_ips()` against a converted fixture per [quickstart.md](./quickstart.md) §1, recording command, date, commit and the `([], [])` / `[]` output (FR-021, SC-008)
 - [ ] T002 Record the baseline suite state (`142 passed`) and the exact runner line in `specs/001-node-role-parser/evidence/baseline-suite.txt`
-- [ ] T003 [P] Create `tests/fixtures/network_map/` with one directory per case from [quickstart.md](./quickstart.md) §2, each holding a schema-valid `network_map.xml` plus a `settings.xml`: `map-controller-only`, `map-two-adopted`, `map-none-adopted`, `map-mixed`, `map-unresolvable`, `map-partial-resolve`, `map-adopted-no-ip`, `map-pre007`, `map-no-self`, `map-incomplete`, `map-no-settings`
+- [ ] T003 [P] Create `tests/fixtures/network_map/` with one directory per case from [quickstart.md](./quickstart.md) §2, each holding a schema-valid `network_map.xml` plus a `settings.xml`: `map-controller-only`, `map-two-adopted`, `map-none-adopted`, `map-mixed`, `map-unresolvable`, `map-partial-resolve`, `map-pre007`, `map-no-self`, `map-incomplete`, `map-no-settings`
 - [ ] T004 [P] Validate every fixture in `tests/fixtures/network_map/` against `../cuems-utils/src/cuemsutils/xml/schemas/network_map.xsd` (canonical uuid, `mac`, `name`, `node_role`, `ip` all required) and record the command in `specs/001-node-role-parser/evidence/fixture-validation.txt`
 - [ ] T005 Add `tests/conftest.py` with a fixture that points the library at a `tests/fixtures/network_map/<case>` directory by setting the `CUEMS_CONF_PATH` environment variable (research R2: the library honours it **over** any `config_dir` argument) and restores it afterwards
 
@@ -122,7 +122,7 @@ uv run --python 3.11 --with pytest --with pytest-asyncio --with pytest-mock \
 
 - [ ] T030 [P] [US2] Extend `tests/test_autoload.py`: with two adopted machines carrying `<ip>`, the gate waits for both and names them
 - [ ] T031 [P] [US2] Extend `tests/test_autoload.py`: with no adopted machine at all, the settle path is taken and reported as a standalone cluster (FR-013)
-- [ ] T032 [P] [US2] Extend `tests/test_autoload.py`: with adopted machines that carry no `<ip>`, the gate settles **with a WARNING naming them** and does NOT report a standalone cluster (FR-013, Principle IV)
+- [ ] T032 [P] [US2] Cover the defensive no-address branch in `tests/test_network_map_adapter.py` by constructing that state directly — the schema makes `<ip>` mandatory, so it is unreachable through a document fixture (research R11); assert it settles with a WARNING naming the machines and does NOT report a standalone cluster (FR-013, Principle IV)
 - [ ] T033 [P] [US2] Extend `tests/test_autoload.py`: a `TopologyError` disables auto-load with a reported failure and does **not** fall through to the settle path
 - [ ] T034 [P] [US2] Extend `tests/test_autoload.py`: an unadopted machine is never waited for and is named as skipped (FR-009, Q4)
 
