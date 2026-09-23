@@ -21,19 +21,25 @@ entry, and a `debian/cuems-power-bridge.install` line putting the shim on `PATH`
 ## `cuems-power-bridge-cluster-poweroff`
 
 ```
-cuems-power-bridge-cluster-poweroff --stage {displays|nodes|all}
-                                    [--node-wait S] [--projector-timeout S]
-                                    [--force] [--dry-run] [--transition] [-v]
+sudo cuems-power-bridge-cluster-poweroff --stage {displays|nodes|all}
+         [--node-wait S] [--projector-timeout S]
+         [--force] [--dry-run] [--transition] [--lock-held] [-v]
 ```
+
+**Manual runs require `sudo`.** The sequence lock is `0770 cuems cuems`, and the operator
+account has its own primary group, so an unprivileged run cannot take it — and a power-off
+that cannot take the lock must fail, not proceed unlocked. Without privilege the tool exits 3
+saying exactly that. The help output and the module docstring say it too.
 
 | Option | Meaning |
 |---|---|
-| `--stage` | which half of the sequence to run. The wrapper calls `displays` and `nodes` separately so its own per-stage time limits keep applying; `all` is for operators and rehearsals. |
+| `--stage` | which half of the sequence to run. The wrapper calls `displays` and `nodes` separately so its own per-stage time limits keep applying; `all` is for operators and rehearsals. With `all`, the two stages run in order and each honours its own bound — `--projector-timeout` for the display stage, `--node-wait` for the machine stage — and the run takes the sequence lock once for both. |
 | `--node-wait` | seconds to wait for machines to go quiet. Supplied by the caller (it lives in the platform package's config file, which is not moving). |
 | `--projector-timeout` | bound for the display stage, same reason. |
 | `--force` | power off every machine in the map, adopted or not, **and** override the running-show refusal. Same meaning as the API's `force=1`. |
 | `--dry-run` | run every branch, change nothing. Independent of the config file's own `dry_run`. |
 | `--transition` | declare that this run is the system's own power-off transition. **Suppresses the running-show probe** (there is no daemon to ask). The wrapper passes it; an operator does not. |
+| `--lock-held` | declare that the **caller** holds the sequence lock, so this invocation must not take it. Passed **only** by the wrapper, which holds one lock across both stages (see **Lock**). Passing it without holding the lock is a caller bug, and the tool says so in its help. |
 | `-v` | DEBUG on stdout. |
 
 ### Exit codes — the contract the wrapper reads
@@ -80,9 +86,26 @@ through stdin.
 
 ---
 
-## Lock
+## Lock — one per SEQUENCE, not per stage
 
-Both tools' power-off path and the daemon take one non-blocking exclusive lock on
-`/run/cuems-power-bridge/shutdown.lock`. The loser refuses (exit 4, or HTTP 409
-`shutdown_already_in_progress`) and never queues. The kernel releases it when the holder
-dies, so an interrupted run blocks nothing.
+A non-blocking exclusive `flock` on `/run/cuems-power-bridge/shutdown.lock`. The loser refuses
+(exit 4, or HTTP 409 `shutdown_already_in_progress`) and never queues. The kernel releases it
+when the holder dies, so an interrupted run blocks nothing.
+
+**Who holds it, and for how long:**
+
+| Caller | Holder | Span |
+|---|---|---|
+| systemd transition | the **wrapper** (`exec 9>…; flock -n 9`) | both stage invocations *and the gap between them* |
+| manual `--stage all` | the CLI | the whole sequence |
+| manual single stage | the CLI | that stage |
+| `POST /shutdown` | the daemon | the whole sequence |
+
+The wrapper's span is the point: with a lock per invocation, the two stages would leave a gap
+in which another power-off could start mid-transition — the same "true in each part, false
+across the whole" defect this feature exists to remove. The wrapper therefore passes
+`--lock-held` to both stages.
+
+**Permission**: `0770 cuems cuems`. A caller that cannot open it exits **3** with "run this
+with sudo"; it never proceeds unlocked. Widening the mode is rejected deliberately — it would
+let any account that can open the file block a cluster power-off.

@@ -23,10 +23,30 @@ into a process that has no use for them.
 | `cfg` | `Config` | ssh user/key, poweroff commands, timeouts, Shelly timer, `dry_run` |
 | `displays` | `DisplayManager` | stage 1, and the parallel power-off in stage 2 |
 | `shelly` | `ShellyClient` | the pre-check and the mains-cut arming |
-| `progress` | `Callable[[str, dict], None]` | state transitions reported OUT; the daemon maps them to `_set_state` and `/status`, the CLI to stdout lines |
+| `progress` | `Callable[[str, dict], None]` | state transitions reported OUT; the daemon maps them to `_set_state` and `/status`, the CLI to stdout lines. The event vocabulary is fixed (§1a) so the two callers can be compared event-for-event |
 
 **Not in the context, deliberately**: `engine` (the sequence never consults it — the running
 -show guard is the caller's business, R3), `editor`, the auto-load state, the HTTP app.
+
+### 1a. `progress` events — the fixed vocabulary
+
+One event per step of the sequence, named after the daemon's existing states so nothing has
+to be translated, plus the two that carry detail the CLI must print and `/status` must
+expose:
+
+| Event | Payload | Emitted |
+|---|---|---|
+| `selected` | `{targets, skipped, mode, partial}` | once, before anything irreversible |
+| `ssh-issued` | `{hosts}` | after the fan-out is dispatched |
+| `polling` | `{hosts}` | entering the reachability wait (omitted in the controller-only case, which emits `nothing-to-poll`) |
+| `nothing-to-poll` | `{reason}` | Case 1 — stated, never silent |
+| `displays` | `{before, after}` | display stage outcome |
+| `arming-shelly` | `{seconds}` | before the mains-cut timer is armed |
+| `poweroff-issued` | `{command}` | the local power-off (or its dry-run equivalent) |
+| `done` | `{stuck_hosts, timed_out}` | terminal |
+
+**Both callers must observe the same events in the same order for the same inputs** — that is
+what T019 asserts. A new event is a change to this table, not an implementation detail.
 
 ---
 
@@ -77,8 +97,12 @@ Neither derives anything the sequence did not state.
 | Path | `/run/cuems-power-bridge/shutdown.lock` |
 | Mechanism | `flock`, exclusive, **non-blocking** |
 | Directory | created by a tmpfiles rule this package ships: `d /run/cuems-power-bridge 0770 cuems cuems - -` |
-| Holders | the daemon (in addition to its in-process lock) and every CLI power-off run |
+| **Scope** | **the whole sequence, never a single stage** (research R2a) |
+| Holders | the daemon; a manual CLI run; and — for the systemd transition — **the wrapper**, which holds it across both stage invocations and the gap between them |
+| CLI opt-out | `--lock-held`, passed **only** by the wrapper, declaring that the caller already holds it. Explicit, because a CLI that inferred this from an inherited descriptor would run unlocked whenever the inference was wrong |
+| Privilege | `0770 cuems cuems`: the daemon and root can take it; the operator account (`cuems-admin`, own primary group) cannot. **Manual runs therefore require `sudo`**, stated in `--help`, in the module docstring and in the README (research R2b) |
 | On contention | refuse immediately, naming that a power-off is in progress. Never queue. |
+| On permission error | exit 3 with "run this with sudo" — never proceed unlocked |
 | On holder death | released by the kernel — no stale-lock handling, which is how lock files usually become their own outage |
 
 ---
@@ -116,3 +140,6 @@ outcome and the reason the script had them.
 | Self-exclusion keeps all three tests, with the duplicate-entry reason recorded | FR-019 |
 | Both reachability passes keep their distinct confirmation policies | FR-020 |
 | Exit codes distinguish complete / precondition / refused / stuck | FR-009 |
+| The lock covers a whole sequence; the wrapper holds it across both stages | FR-014, research R2a |
+| A manual run without privilege fails legibly rather than running unlocked | FR-013, research R2b |
+| Both callers emit the same progress events in the same order | FR-001, §1a |

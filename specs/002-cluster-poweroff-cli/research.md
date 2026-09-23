@@ -31,11 +31,12 @@ caller.** The user asked for a *proper end product*, not a shim: the CLI must no
 parallel path that happens to call the same selection function.
 
 ```
-run_cluster_shutdown(ctx, selection, *, progress) -> ShutdownOutcome
+run_cluster_shutdown(ctx, decision, *, progress) -> ShutdownOutcome
 ```
 
-where `ctx` carries `cfg`, `displays`, `shelly` and nothing else the sequence does not use,
-and `progress` is a callback the caller supplies to receive state transitions.
+where `ctx` carries `cfg`, `displays`, `shelly` and nothing else the sequence does not use;
+`decision` is the six-case verdict (§R1a — the `Selection` is the decision's *input*, not the
+sequence's); and `progress` is a callback the caller supplies to receive state transitions.
 
 **Rationale.**
 - The sequence becomes testable without an HTTP request and without a `Bridge`.
@@ -89,6 +90,48 @@ happens at an unpredictable moment.
 
 **The daemon takes the same lock**, in addition to its asyncio lock (which still gives the
 cheaper in-process rejection and the existing `shutdown_already_in_progress` response).
+
+### R2a. The lock spans the SEQUENCE, not a stage — corrected 2026-09-23 (analysis C1)
+
+An earlier draft had each CLI invocation take and release the lock. The wrapper runs the two
+stages as **two processes** (`--stage displays`, then `--stage nodes`), so mutual exclusion
+would lapse in the gap between them: the daemon or a second run could acquire the lock and
+begin a shutdown *mid-transition*. That is the same class of defect this feature exists to
+remove — a guarantee that holds in each part and not across the whole, on the product path.
+
+**Decision (user): the wrapper holds the lock for the whole transition.**
+
+```sh
+exec 9>/run/cuems-power-bridge/shutdown.lock
+flock -n 9 || { log "another power-off is already in progress"; exit 4; }
+# ... stage 1 ... stage 2 ...   (fd 9 stays open; the kernel releases it when the wrapper exits)
+```
+
+The CLI is then told not to acquire it: **`--lock-held`** declares "my caller holds the
+sequence lock". The flag exists so the skip is *explicit* — a CLI that guessed from an
+inherited file descriptor would silently run unlocked when the guess was wrong.
+
+| Caller | Who holds the lock | For how long |
+|---|---|---|
+| systemd transition (wrapper) | the **wrapper**, fd 9 | both stages, plus the gap between them |
+| manual `--stage all` | the CLI | the whole sequence |
+| manual single stage | the CLI | that stage |
+| daemon `POST /shutdown` | the daemon | the whole sequence |
+
+**Using `--lock-held` without actually holding it is a caller bug**, and the only caller that
+may pass it is the wrapper. The CLI states as much in its help.
+
+### R2b. Who may run it by hand — `sudo` (analysis H1)
+
+The lock lives at `0770 cuems cuems`. The operator account `cuems-admin` gets its **own**
+primary group (`cuems-common/debian/postinst:429-433`), so it is not in group `cuems` and
+cannot open that file. **Decision (user): manual runs require `sudo`**, and the tool says so —
+in its `--help`, in its module docstring, and in the README.
+
+The lock's mode stays as it is: widening it to make an unprivileged run work would hand the
+ability to block a cluster power-off to any account that can open the file. The failure is
+instead made legible — a permission error on the lock exits 3 with "run this with sudo",
+never proceeding unlocked.
 
 ---
 

@@ -216,16 +216,22 @@ observe it reports one clear message and does not fail the shutdown.
   changes nothing.
 - **FR-012**: The tool MUST take the caller's timing and policy values as arguments rather
   than reading the platform package's configuration file, which stays where it is.
-- **FR-013**: The tool MUST work both as the privileged account used by the system
-  transition and as the service account used by the daemon, without assuming either.
+- **FR-013**: The shared sequence MUST assume neither execution identity — it runs as the
+  privileged account under the system transition and as the service account inside the daemon,
+  and reads no identity-dependent path directly. A **manual** run requires elevated privilege
+  (the sequence lock is owned by the service account, and the operator account is not in its
+  group); the tool MUST say so in its help and in its documentation, and MUST fail with a
+  precondition error rather than running without the lock.
 
 **Safety decisions**
 
 - **FR-014**: Concurrent power-offs MUST NOT interleave, across processes as well as within
-  one. Every entry point MUST take one exclusive machine-wide lock before beginning the
-  sequence, and MUST refuse — reporting that a power-off is already in progress — rather than
-  wait for it. The lock MUST be released automatically if its holder dies, so a killed
-  process cannot block the next shutdown.
+  one. One exclusive machine-wide lock MUST cover **a whole power-off sequence**, not a part
+  of one: where the sequence is invoked as two separate stages, the **caller** holds the lock
+  across both and the stages are told not to take it themselves. Every entry point MUST refuse
+  — reporting that a power-off is already in progress — rather than wait. The lock MUST be
+  released automatically if its holder dies, so a killed process cannot block the next
+  shutdown.
 - **FR-015**: A manual run MUST refuse while a project is playing unless explicitly forced.
   This guard MUST live in the tool's entry point, NOT in the shared sequence: it asks the
   running daemon, and when the daemon is unreachable — the system-transition case — no guard
