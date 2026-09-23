@@ -16,6 +16,11 @@ not to the current xml-refactor feature.
   `cuems-utils` (`feat/xml-refactor`), `cuems-nodeconf` (`feat/xml-refactor`),
   `cuems-frontend` (`main`), `gradient-motion-engine` (`main`)
 
+**First concrete step**: [`cuems-common-heredocs-absorption.md`](./cuems-common-heredocs-absorption.md)
+— move the 221 lines of *this repository's Python* out of `cuems-cluster-poweroff`'s
+heredocs, leaving the unit, the conffile and the bash wrapper where they are. It needs none
+of the packaging work below and can be staged rather than cut over.
+
 **Companion documents**, beside this file:
 - `cuems-utils-xml-refactor-consumer-migration.md` — the current feature (node_role
   parser migration). §8 below states how this document constrains it.
