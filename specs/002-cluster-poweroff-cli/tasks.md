@@ -65,10 +65,10 @@ Baseline: **185 passed** (feature 001).
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Record the baseline suite state and the runner line in `specs/002-cluster-poweroff-cli/evidence/baseline-suite.txt` (must be 185 passed; never start on a red suite)
-- [ ] T002 [P] Add the tmpfiles rule `debian/tmpfiles.d/cuems-power-bridge.conf` — `d /run/cuems-power-bridge 0770 cuems cuems - -` (research R2: `/run` is root-owned, so the daemon running as `cuems` cannot create its own lock directory)
-- [ ] T003 [P] Ship the rule from `debian/cuems-power-bridge.install` to `usr/lib/tmpfiles.d/`, and run `systemd-tmpfiles --create` in `debian/cuems-power-bridge.postinst` so the directory exists before the next boot
-- [ ] T004 [P] Capture a pre-change copy of `src/cuemspowerbridge/bridge.py` lines 508-644 into `specs/002-cluster-poweroff-cli/evidence/sequence-before.txt`, so Phase 2's extraction can be reviewed as a **move** rather than a rewrite (quickstart §2)
+- [X] T001 Record the baseline suite state and the runner line in `specs/002-cluster-poweroff-cli/evidence/baseline-suite.txt` (must be 185 passed; never start on a red suite)
+- [X] T002 [P] Add the tmpfiles rule `debian/tmpfiles.d/cuems-power-bridge.conf` — `d /run/cuems-power-bridge 0770 cuems cuems - -` (research R2: `/run` is root-owned, so the daemon running as `cuems` cannot create its own lock directory)
+- [X] T003 [P] Ship the rule from `debian/cuems-power-bridge.install` to `usr/lib/tmpfiles.d/`, and run `systemd-tmpfiles --create` in `debian/cuems-power-bridge.postinst` so the directory exists before the next boot
+- [X] T004 [P] Capture a pre-change copy of `src/cuemspowerbridge/bridge.py` lines 508-644 into `specs/002-cluster-poweroff-cli/evidence/sequence-before.txt`, so Phase 2's extraction can be reviewed as a **move** rather than a rewrite (quickstart §2)
 
 **Checkpoint**: the lock has a home; the sequence's "before" is on record.
 
@@ -78,9 +78,9 @@ Baseline: **185 passed** (feature 001).
 
 **⚠️ Blocks every user story. T007–T011 are the extraction — reviewed as a move.**
 
-- [ ] T005 Implement `src/cuemspowerbridge/shutdown_lock.py`: a non-blocking exclusive `flock` over `/run/cuems-power-bridge/shutdown.lock`, as a context manager that raises a typed "already held" error rather than waiting; a **no-op mode** for a caller that already holds it (research R2a); a precondition failure when the directory is absent; and a `PermissionError` reported as a precondition failure naming the lock path — **never proceed unlocked** (research R2b, data-model §4)
-- [ ] T005a Make the lock location a parameter of `src/cuemspowerbridge/shutdown_lock.py` defaulting to `/run/cuems-power-bridge/shutdown.lock`, and add a `tests/conftest.py` fixture pointing it at `tmp_path` — otherwise the 13 existing tests that call `handle_shutdown` directly start depending on `/run/cuems-power-bridge` existing on whoever's machine runs the suite (analysis H2)
-- [ ] T006 [P] Test the lock in `tests/test_shutdown_lock.py`: a second acquisition fails immediately; the lock is released when the holding process dies; a missing directory and an unreadable one are precondition errors, not unlocked runs; and the no-op mode does not acquire anything
+- [X] T005 Implement `src/cuemspowerbridge/shutdown_lock.py`: a non-blocking exclusive `flock` over `/run/cuems-power-bridge/shutdown.lock`, as a context manager that raises a typed "already held" error rather than waiting; a **no-op mode** for a caller that already holds it (research R2a); a precondition failure when the directory is absent; and a `PermissionError` reported as a precondition failure naming the lock path — **never proceed unlocked** (research R2b, data-model §4)
+- [X] T005a Make the lock location a parameter of `src/cuemspowerbridge/shutdown_lock.py` defaulting to `/run/cuems-power-bridge/shutdown.lock`, and add a `tests/conftest.py` fixture pointing it at `tmp_path` — otherwise the 13 existing tests that call `handle_shutdown` directly start depending on `/run/cuems-power-bridge` existing on whoever's machine runs the suite (analysis H2)
+- [X] T006 [P] Test the lock in `tests/test_shutdown_lock.py`: a second acquisition fails immediately; the lock is released when the holding process dies; a missing directory and an unreadable one are precondition errors, not unlocked runs; and the no-op mode does not acquire anything
 - [ ] T007 Create `src/cuemspowerbridge/cluster_shutdown.py` with `StageContext` (`cfg`, `displays`, `progress` — deliberately **no** `shelly`, no local-poweroff command, no `engine`) and `StageOutcome` per [data-model.md](./data-model.md) §1, §3
 - [ ] T008 Move the shared six-case decision into `src/cuemspowerbridge/cluster_shutdown.py` as a pure function of `(selection, force)` returning `ShutdownDecision` (data-model §2), leaving the HTTP/CLI mapping to the callers
 - [ ] T009 Move the two **stage bodies** out of `src/cuemspowerbridge/bridge.py:508-644` into `run_display_stage()` and `run_node_stage(..., pre_pass: bool)` in `src/cuemspowerbridge/cluster_shutdown.py` — timeouts and log lines unchanged, state reported through `progress` instead of `_set_state`. **The relay pre-check, the mains-cut arming and the local power-off do NOT move**: they stay in `bridge.py`, because the HTTP route ends by triggering the transition that runs the other caller and a shared sequence would arm the relay twice per shutdown (FR-001a)
