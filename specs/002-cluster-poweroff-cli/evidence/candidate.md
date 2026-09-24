@@ -10,9 +10,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 | Repository | Version | Tag at | Carries |
 |---|---|---|---|
 | `cuems-power-bridge` | **0.3.1-1** | `d5c4226` ✅ tagged | features 001 (node_role parser) and 002 (power-off CLI) |
-| `cuems-common` | **1.3.0-23** (UNRELEASED) | `3af31cc` — **tag still at `f2fc0f5`, needs relocating** | the `node_role` conversion, the fixed `cuems-cluster-poweroff`, the heredoc removal |
+| `cuems-common` | **1.3.0-23** (UNRELEASED) | `3af31cc` ✅ tagged (relocated from `f2fc0f5`, 2026-09-24) | the `node_role` conversion, the fixed `cuems-cluster-poweroff`, the heredoc removal |
 | `cuems-nodeconf` | 0.1.0-8 (UNRELEASED) | `6c0cca7` ✅ tagged | its own two features |
-| `cuems-utils` | 0.1.0rc16 | — | the node model, the schemas, `settings.xml` |
+| `cuems-utils` | 0.1.0rc16 (`ce5b5b0`) | — tags later, by decision | the node model, the schemas, `settings.xml` |
 
 ## What this candidate changes on a controller
 
@@ -42,29 +42,24 @@ machine; the record sheets are per host.
 
 ```
 cuems-power-bridge   d5c4226  ✅ at the reviewed merge
-cuems-common         f2fc0f5  ❌ THREE commits behind its half (3af31cc)
+cuems-common         3af31cc  ✅ RELOCATED 2026-09-24, was f2fc0f5
 cuems-nodeconf       6c0cca7  ✅ deliberate: its head be45dda is the docs commit
                               that records the tag, written after cutting it
-cuems-utils          —        ❌ NO TAG AT ALL
+cuems-utils          —        ⏳ tags later, by decision (below)
 ```
 
-**Two findings, not formalities.**
+**The relocation, and why it mattered.** `cuems-common`'s tag sat at `f2fc0f5`, three commits
+behind its own half — before the `node_role` fix (`df7e354`), the documentation corrections
+(`123c93d`) and the heredoc removal (`3af31cc`). Anyone checking out the candidate there got a
+tree whose orderly power-off was still broken, which is the precise failure this candidate
+exists to fix. Moved with the user's confirmation and force-pushed, because moving a published
+tag rewrites what other checkouts see.
 
-`cuems-common`'s tag predates both of its halves: it sits at `f2fc0f5`, before the
-`node_role` fix (`df7e354`), the documentation corrections (`123c93d`) and the heredoc removal
-(`3af31cc`). Anyone checking out the candidate there gets a tree whose power-off is still
-broken. Relocation is prepared and awaiting confirmation — moving a published tag rewrites what
-other checkouts see.
-
-`cuems-utils` carries **no** `xml-refactor-merge-candidate` tag, though `0.1.0rc16` on
-`feat/xml-refactor` (`ce5b5b0`) is what every other repository in this candidate pins and
-depends on. Until it is tagged, the candidate names a version but not a commit — and this is
-the repository that owns the node model, the schemas and `settings.xml`. **Someone with
-authority over that repository should cut it.**
+**`cuems-utils` tags last, by decision**: it is the library every other repository here pins,
+so its candidate tag is cut once all its consumers are ready rather than before them. Until
+then this candidate names its version (`0.1.0rc16`) and its commit (`ce5b5b0`) here instead.
 
 ## Still open
-
-- `cuems-common`'s tag relocation (above), and `cuems-utils`' missing tag.
 - Two build-host tasks: the `.deb` bundling gate (T042) and the `cuems-utils` `settings.xml`
   provenance check.
 - Every hardware check. **The candidate is not validated until the ledgers are worked.**
