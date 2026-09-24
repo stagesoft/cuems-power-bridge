@@ -112,15 +112,15 @@ situations, and say the same things.
 **Independent Test**: drive every fixture through both entry points and compare decisions
 field by field.
 
-- [ ] T017 [P] [US1] Add `tests/test_shutdown_equivalence.py`: parameterise over `tests/fixtures/network_map/*` and assert the HTTP route and the helper produce the same `ShutdownDecision` — case, targets, refusal token, partial flag. **Selection and stage semantics are what must match; orchestration deliberately differs** (FR-002)
-- [ ] T018 [P] [US1] Assert in `tests/test_shutdown_equivalence.py` that each refusal maps consistently across transports: `no_adopted_nodes` → 409/exit 4, `no_resolvable_nodes` → 409/exit 4, `topology_unreadable` → 503/exit 4
-- [ ] T019 [P] [US1] Assert in `tests/test_shutdown_equivalence.py` that a proceeding run reaches the same steps in the same order through both callers (progress events compared, not just the outcome)
-- [ ] T019a [P] [US1] Assert in `tests/test_cluster_shutdown.py` that the shared module contains **no** reference to the relay, to a local power-off command, or to `arming-shelly`/`poweroff-issued` events — they belong to the HTTP route alone (FR-001a)
-- [ ] T020 [US1] Assert the guard is **unreachable from the stage bodies** in `tests/test_shutdown_equivalence.py`: `src/cuemspowerbridge/cluster_shutdown.py` references neither the engine nor `/status`; the running-show probe exists only in `scripts/cluster_poweroff.py` (SC-010 — a claim about reachability, so a source-level assertion is the right instrument)
+- [X] T017 [P] [US1] Add `tests/test_shutdown_equivalence.py`: parameterise over `tests/fixtures/network_map/*` and assert the HTTP route and the helper produce the same `ShutdownDecision` — case, targets, refusal token, partial flag. **Selection and stage semantics are what must match; orchestration deliberately differs** (FR-002)
+- [X] T018 [P] [US1] Assert in `tests/test_shutdown_equivalence.py` that each refusal maps consistently across transports: `no_adopted_nodes` → 409/exit 4, `no_resolvable_nodes` → 409/exit 4, `topology_unreadable` → 503/exit 4
+- [X] T019 [P] [US1] Assert in `tests/test_shutdown_equivalence.py` that a proceeding run reaches the same steps in the same order through both callers (progress events compared, not just the outcome)
+- [X] T019a [P] [US1] Assert in `tests/test_cluster_shutdown.py` that the shared module contains **no** reference to the relay, to a local power-off command, or to `arming-shelly`/`poweroff-issued` events — they belong to the HTTP route alone (FR-001a)
+- [X] T020 [US1] Assert the guard is **unreachable from the stage bodies** in `tests/test_shutdown_equivalence.py`: `src/cuemspowerbridge/cluster_shutdown.py` references neither the engine nor `/status`; the running-show probe exists only in `scripts/cluster_poweroff.py` (SC-010 — a claim about reachability, so a source-level assertion is the right instrument)
 - [X] T021 [US1] Diff `run_cluster_shutdown` against `specs/002-cluster-poweroff-cli/evidence/sequence-before.txt` and record the review in `specs/002-cluster-poweroff-cli/evidence/extraction-diff.md`, justifying every line that is not a pure move
-- [ ] T022 [US1] Verify no existing HTTP behaviour changed: reason tokens, status codes and `/status` keys are as feature 001 left them (`tests/test_shutdown_cases.py` must pass untouched)
-- [ ] T023 [US1] Take the lock in both callers and assert cross-process exclusion in `tests/test_shutdown_equivalence.py`: whichever holds it, the other refuses (`409` / exit 4) and never queues; and a run given `--lock-held` does **not** acquire it (FR-014, SC-009)
-- [ ] T023a [US1] Assert the wrapper's span in `tests/test_sibling_decoupling.py`: `../cuems-common/usr/bin/cuems-cluster-poweroff` acquires the lock **before** the first stage and holds it past the second, and passes `--lock-held` to both — the gap this feature's analysis found (research R2a)
+- [X] T022 [US1] Verify no existing HTTP behaviour changed: reason tokens, status codes and `/status` keys are as feature 001 left them (`tests/test_shutdown_cases.py` must pass untouched)
+- [X] T023 [US1] Take the lock in both callers and assert cross-process exclusion in `tests/test_shutdown_equivalence.py`: whichever holds it, the other refuses (`409` / exit 4) and never queues; and a run given `--lock-held` does **not** acquire it (FR-014, SC-009)
+- [ ] ⏸ DEFERRED to Phase 4 (the wrapper is rewritten there) — T023a [US1] Assert the wrapper's span in `tests/test_sibling_decoupling.py`: `../cuems-common/usr/bin/cuems-cluster-poweroff` acquires the lock **before** the first stage and holds it past the second, and passes `--lock-held` to both — the gap this feature's analysis found (research R2a)
 
 **Checkpoint**: US1 is the MVP — the de-duplication is real and checkable.
 
@@ -134,7 +134,7 @@ package holds none of it.
 **Independent Test**: run the suite and see both stages covered; grep the sibling's scripts
 for this package's name and find nothing.
 
-- [ ] T024 [P] [US2] Extend `tests/test_cluster_shutdown.py` to cover the display stage end to end — configured fleet, no fleet, an unreachable fleet — without hardware
+- [X] T024 [P] [US2] Extend `tests/test_cluster_shutdown.py` to cover the display stage end to end — configured fleet, no fleet, an unreachable fleet — without hardware
 - [ ] T025 [US2] Delete the two Python heredocs from `../cuems-common/usr/bin/cuems-cluster-poweroff` and call `"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff --stage displays|nodes` with the conffile's values as arguments, plus `--pre-pass --lock-held`; keep each call inside its existing `timeout` and its `| while read … log` pipe
 - [ ] T025a [US2] Take the sequence lock **in the wrapper**, spanning both stages: `exec 9>/run/cuems-power-bridge/shutdown.lock; flock -n 9 || { log …; exit 4; }` in `../cuems-common/usr/bin/cuems-cluster-poweroff`, so no other power-off can start in the gap between them (research R2a — this is the analysis C1 fix, and the gap it closes is on the product path)
 - [ ] T026 [US2] Keep every one of the wrapper's own responsibilities verbatim (research R0): the `enabled=` kill switch, the poweroff-vs-reboot `systemctl list-jobs` check with its unknown-means-skip default, the `timeout 10s systemctl stop cuems-displays-on.service`, the ordering probe on every path, the `nodes_off=false` early return, the per-stage `timeout` bounds — **and the `[ ! -x "$venv_python" ]` guard exactly as written**, which keeps working unchanged because the helper is invoked through that same interpreter
