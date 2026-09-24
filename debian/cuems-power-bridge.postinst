@@ -44,6 +44,13 @@ case "$1" in
             echo "cuems-power-bridge: run 'cuems-power-bridge-deploy-keys <node>...' to authorise nodes."
         fi
 
+        # Create /run/cuems-power-bridge for the power-off sequence lock. The
+        # tmpfiles rule handles every boot; this handles the current one, so a
+        # freshly installed bridge can take the lock without a reboot.
+        if command -v systemd-tmpfiles >/dev/null 2>&1; then
+            systemd-tmpfiles --create /usr/lib/tmpfiles.d/cuems-power-bridge.conf || true
+        fi
+
         # Reload systemd state if available (unit ships from this package).
         if command -v deb-systemd-helper >/dev/null 2>&1; then
             deb-systemd-helper update-state >/dev/null 2>&1 || true

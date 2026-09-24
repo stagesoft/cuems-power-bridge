@@ -18,6 +18,11 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
+#: Shared SSH host-key store, pinned so the identity of the caller cannot
+#: change which one is used. Owned by the service account; root writes to it
+#: regardless of mode.
+KNOWN_HOSTS = "/var/lib/cuems/.ssh/known_hosts"
+
 
 @dataclass
 class SshTarget:
@@ -35,6 +40,12 @@ async def _ssh_one(target: SshTarget, dry_run: bool, connect_timeout: int = 5) -
         "-o", f"ConnectTimeout={connect_timeout}",
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
+        # ONE host-key store for both initiators. The daemon runs as `cuems`
+        # (HOME=/var/lib/cuems) and the ExecStop hook as root (HOME=/root), so
+        # without pinning they keep SEPARATE known_hosts: a node re-imaged
+        # between a daemon shutdown and a transition shutdown would be trusted
+        # by one and unknown to the other, discovered mid-shutdown.
+        "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
         f"{target.user}@{target.host}",
         "--",
         target.poweroff_cmd,

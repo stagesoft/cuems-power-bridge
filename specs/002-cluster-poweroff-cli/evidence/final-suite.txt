@@ -1,0 +1,14 @@
+# T043 — final suite for feature 002
+# Date:   2026-09-24T08:48:35+00:00
+# Commit: 8a4ee54
+
+
+============================= 276 passed in 18.48s =============================
+
+# 185 at the start of this feature; 91 added:
+#   test_shutdown_lock.py          8   the cross-process lock
+#   test_cluster_shutdown.py      26   the two stage bodies, in isolation
+#   test_node_executor.py          3   one shared host-key store
+#   test_cli_poweroff.py          27   exit codes, and the guard's truth table
+#   test_shutdown_equivalence.py  25   both entry points, one decision
+#   test_sibling_decoupling.py     7   cuems-common holds none of our Python

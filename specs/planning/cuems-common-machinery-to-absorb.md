@@ -418,14 +418,54 @@ untouched by the refactor and must stay so.
 
 ## 10. Open questions for the future feature
 
-- [ ] A3: stay an external poller or become a daemon task? (§2.2 — the restart
-      semantics are the deciding factor.)
-- [ ] A5: merge into `power-bridge.conf`, and with what compatibility window?
-- [ ] A6: move with A2, or keep as host policy in cuems-common?
-- [ ] A7: confirm the NNG migration's privilege model before deciding it (§6).
-- [ ] One `known_hosts` for both initiators, or two on purpose? (§5.2)
-- [ ] Unify A1 stage 2 with the daemon's `/shutdown` node selection into a single
-      code path, including the empty-selection invariant from the xml-refactor.
+**Status convention**: `[x]` = decided, and the decision is recorded here. A decision whose
+implementation is still pending says so and names the task that closes it; it is not marked
+complete until that task is done.
+
+- [x] **A3: stay an external poller.** Decided 2026-09-23 (feature 002, Q3): it remains a
+      shell script in `cuems-common` and asks this package for the two values it needs through
+      `cuems-power-bridge-config --get`. The restart semantics were the deciding factor — an
+      in-daemon task would reset the confirmation window on every bridge restart.
+- [ ] A5: merge into `power-bridge.conf`, and with what compatibility window? **Still open**,
+      and deliberately deferred by feature 002 (the conffile stays in `cuems-common`). Feature
+      002 does retire one key: `venv_python` becomes unused once the wrapper probes for the
+      tool instead of the interpreter (its task T026a).
+- [ ] A6: move with A2, or keep as host policy in cuems-common? **Still open** — untouched by
+      feature 002, which moves code and leaves every unit where it is.
+- [ ] A7: confirm the NNG migration's privilege model before deciding it (§6). **Still open**,
+      and §2.5's recommendation stands: leave it in `cuems-common`.
+- [x] **One `known_hosts` for both initiators.** Decided 2026-09-23 (feature 002, analysis G5):
+      **one shared store at `/var/lib/cuems/.ssh/known_hosts`**, pinned explicitly with
+      `-o UserKnownHostsFile=` so the daemon (as `cuems`) and the transition (as root) use the
+      same file. Two stores meant a re-imaged node could be trusted by one initiator and
+      unknown to the other, discovered mid-shutdown. *Implementation pending: feature 002
+      T010c/T010d.*
+- [x] **Unify A1 stage 2 with the daemon's `/shutdown` node selection.** Decided 2026-09-23 —
+      this is feature 002 in its entirety: one `run_cluster_shutdown()` and one shared six-case
+      decision, with the empty-selection invariant inherited from the xml-refactor. *Pending
+      its own implementation (002 Phase 2).*
 - [ ] Coordinate with `../cuems-common/dev/planning/systemd-service-split-architecture.md`
       §7.2, whose per-unit inventory lists `cuems-cluster-poweroff.service` as
-      class A + D + B but does not yet name this package as its owner.
+      class A + D + B but does not yet name this package as its owner. **Still open** — feature
+      002 changes what the unit *invokes*, not who owns it.
+
+### Points this document made that feature 002 must honour — conformance
+
+Checked by `/speckit-analyze` on 2026-09-23, with this document as an additional authority.
+Unticked items are covered by a named task and are ticked when that task is done.
+
+- [x] §2.2 A3's poller-vs-daemon question decided deliberately (Q3)
+- [x] §5.2 the two-`known_hosts` question decided at absorption (G5)
+- [x] §10 stage 2 and `/shutdown` unified into one code path
+- [ ] §2.1 the **complete** library surface carried over, including the display stage's
+      `projector_power_off_on_shutdown` gate — **missed in the first draft of 002 and
+      restored by its T009a/T009b** (analysis G4)
+- [ ] §2.1 the bridge's `/shutdown` re-entry stays a fast no-op — feature 002's lock would
+      have refused it; the daemon now releases the lock first (002 T010a/T010b, analysis C2)
+- [ ] §2.3 `venv_python` stops being live configuration (002 T026a)
+- [ ] §7.6 `systemd-analyze verify` of the unit whose wrapper is rewritten (002 T036a)
+- [ ] §9 the stale `99-cuems-poweroff` header corrected (002 T028a)
+- [x] §3.1/§3.2 S1 and the SSH platform untouched by 002
+- [x] §7.4 the role gate and the behaviour gate preserved (002 T026, T037–T039)
+- [x] §8 the frozen library surface discharged rather than broken — 002 ends its life as a
+      cross-package contract; the code itself stays as internal API

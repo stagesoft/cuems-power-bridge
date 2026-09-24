@@ -5,7 +5,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Absorbing `cuems-cluster-poweroff`'s Python into this repository
 
-**Status**: analysis, no change made. The concrete **first step** of the deferred split
+**Status**: analysis — **executed by feature `002-cluster-poweroff-cli`** (specified, planned
+and tasked 2026-09-23; implementation pending). Its §4 findings and §7 exit criteria are
+carried as requirements there: FR-017–FR-020 and the tasks named in §4 below. The concrete
+**first step** of the deferred split
 recorded in [`cuems-common-machinery-to-absorb.md`](./cuems-common-machinery-to-absorb.md)
 — it moves the *code*, and deliberately leaves the unit, the conffile and the bash wrapper
 where they are.
@@ -79,13 +82,17 @@ two repositories, in lockstep. Absorbed first, it rewrites one.
 | **The package boundary remains** | The unit, `cluster-poweroff.conf` and the bash wrapper stay in `cuems-common` (that split is deferred). The call becomes `exec` + exit codes instead of an import — better, not gone. |
 | **Two config files remain** | `cluster-poweroff.conf` is shell-sourced (`enabled`, `nodes_off`, `node_wait_s`, `projector_timeout_s`); `power-bridge.conf` is Python-parsed. The CLI must accept the first as arguments rather than read it. |
 | **The bash wrapper earns its keep** | It distinguishes a poweroff transaction from a reboot (`systemctl list-jobs`), carries the `enabled=` kill switch, applies `timeout` hard bounds, probes for the venv interpreter, and logs one ERROR and exits 0 when this package is absent. None of that should move: it is what keeps `cuems-common` functional on a host with no bridge. |
-| **A new versioned edge** | `cuems-common` would call an entry point that exists only from 0.3.1-1. Milder than today's edge (a `command -v` probe degrades gracefully) but still an edge. |
-| **Identity differs from the daemon's** | The hook runs as **root** with `HOME=/root` for `known_hosts`; the daemon runs as `cuems`. Shared code must not assume either, and the two `known_hosts` stores stay separate unless that is deliberately changed. |
+| **A new versioned edge** | `cuems-common` calls an entry point that exists only from 0.3.1-1. Milder than today's edge (a `command -v` probe degrades gracefully) but still an edge — and moot in practice, since both halves land in the same coordinated candidate. |
+| **Identity differs from the daemon's** | The hook runs as **root** with `HOME=/root`; the daemon runs as `cuems`. Shared code must not assume either. The two `known_hosts` stores **were** the default consequence — feature 002 deliberately changed it (analysis G5): one shared store at `/var/lib/cuems/.ssh/known_hosts`, pinned explicitly, because two stores meant a re-imaged node could be trusted by one initiator and unknown to the other, discovered mid-shutdown. |
 | **No net code reduction** | ~220 lines relocate and an entry point is added. The gain is testability and ownership, not size. |
 
 ---
 
 ## 4. Findings in the current code, to fix *during* the move
+
+**Status 2026-09-23**: all four are carried by feature 002 — (1) and (3) as FR-017/FR-018 with
+task T012a, (2) as FR-019 with T010, (4) as FR-020 with T012. They are ticked when those tasks
+are done, not now.
 
 1. **`own_uuid()` (`:238-247`) still parses `settings.xml` with `ElementTree`** — a private
    read of a cuemsutils-owned document, one file away from the private reader feature 001
@@ -137,9 +144,9 @@ cuems-power-bridge-cluster-poweroff --stage nodes --wait 120 [--force] [--dry-ru
   `.shared_token`) move the same way or become a `--print-config` query, so no shell script
   imports our modules any more.
 
-**The deeper version, worth deciding early:** make the CLI and `handle_shutdown` both call
-one `run_cluster_shutdown(selection, …)`, rather than making the CLI a parallel path that
-happens to use the same selection function. That is the version in which "the wall switch
+**Decided 2026-09-23 (the deeper version, chosen by the user):** the CLI and `handle_shutdown`
+both call one `run_cluster_shutdown(ctx, decision, …)`, rather than the CLI being a parallel
+path that happens to use the same selection function. That is the version in which "the wall switch
 and the HTTP API cannot disagree" is true **by construction** instead of by discipline. It
 is more work, and it is the reason to do this before the NNG migration rather than after.
 

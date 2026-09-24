@@ -20,7 +20,7 @@ from typing import Any
 
 from aiohttp import web
 
-from . import cluster_bus, network_map
+from . import cluster_bus, cluster_shutdown, network_map, shutdown_lock
 from .config import Config
 from .displays.manager import DisplayManager
 from .editor_client import EditorClient
@@ -434,8 +434,24 @@ class Bridge:
                                  found=selection.found, unresolvable=uuids)
 
             self._record_selection(selection, len(selection.targets))
+
+            # The cross-process lock: the in-process one above cannot see the
+            # ExecStop helper, and the helper cannot see it. Non-blocking —
+            # a second power-off refuses rather than queueing.
             try:
-                await self._run_shutdown(selection)
+                lock_cm = shutdown_lock.acquire(self.cfg.shutdown_lock_path)
+                lock = lock_cm.__enter__()
+            except shutdown_lock.ShutdownInProgress as e:
+                log.warning("shutdown refused: %s", e)
+                self._set_state("idle", error="shutdown_already_in_progress")
+                return self._err("shutdown_already_in_progress", 409)
+            except shutdown_lock.ShutdownLockUnavailable as e:
+                log.error("shutdown REFUSED: %s", e)
+                self._set_state("idle", error="lock_unavailable")
+                return self._err("lock_unavailable", 503, detail=str(e))
+
+            try:
+                await self._run_shutdown(selection, lock)
                 # If _run_shutdown returned without raising, poweroff was
                 # issued. Status stays at "poweroff-issued" until the
                 # process gets SIGTERM'd by systemd.
@@ -450,7 +466,23 @@ class Bridge:
                 log.exception("shutdown failed unexpectedly")
                 self._set_state("failed", error=str(e))
                 return self._err("internal_error", 500)
+            finally:
+                # Idempotent: _run_shutdown already released it before issuing
+                # the local poweroff, on the path that gets that far.
+                lock_cm.__exit__(None, None, None)
 
+
+    def _on_stage_progress(self, event: str, detail: dict) -> None:
+        """Map the shared stages' events onto this daemon's state machine.
+
+        The stages do not know which caller they are feeding; the helper turns
+        the same events into stdout lines."""
+        if event == "polling":
+            self._set_state("polling")
+        elif event == "ssh-issued":
+            self._nodes_pending = list(detail.get("hosts", []))
+        elif event == "done":
+            self._nodes_pending = list(detail.get("stuck_hosts", []))
 
     # ------------------- topology -------------------
 
@@ -505,99 +537,45 @@ class Bridge:
 
     # ------------------- shutdown coordinator -------------------
 
-    async def _run_shutdown(self, selection: network_map.Selection) -> None:
+    async def _run_shutdown(self, selection: network_map.Selection,
+                            lock: "shutdown_lock._Held | None" = None) -> None:
         # Step 4 (unload) intentionally omitted: engine WS dispatcher has
         # no /engine/command/unload handler. See plan.
+        #
+        # Steps 5-7 are the two SHARED stage bodies (cluster_shutdown). This
+        # route runs them CONCURRENTLY — a slow or unreachable projector must
+        # never add latency to the safety-critical node path — where the
+        # ExecStop hook runs them in order, displays first. The relay and the
+        # local poweroff below stay here: the hook must never do either, and
+        # this route ends by triggering the very transition that runs it.
+        ctx = cluster_shutdown.StageContext(
+            cfg=self.cfg, displays=self.displays, progress=self._on_stage_progress,
+        )
+        self._nodes_pending = list(selection.targets)
 
-        # Step 5: the target list, already decided and vetted by the caller.
-        resolved = list(selection.targets)
-        self._nodes_pending = list(resolved)
-        if selection.mode == "controller_only":
-            # Case 1: the map was read and it says this cluster is one machine.
-            # An ANSWER, not an anomaly — and said out loud, because "no nodes
-            # to power off" must never be silence.
-            log.info("shutdown: controller-only cluster (%s lists no other node) "
-                     "— no node poweroff, nothing to wait for",
-                     self.cfg.network_map_path)
-        else:
-            log.info("shutdown: %d node(s) to power off (%s): %s",
-                     len(resolved), selection.mode, ", ".join(resolved))
-            if selection.partial:
-                log.error(
-                    "shutdown: PARTIAL selection — %d of %d adopted node(s) could "
-                    "not be addressed and will stay up when mains is cut: %s",
-                    len(selection.unresolvable), selection.adopted_count,
-                    ", ".join(k.uuid for k in selection.unresolvable),
-                )
-            skipped = [f"{k.label}({k.reason.value})" for k in selection.skipped]
-            if skipped:
-                log.info("shutdown: skipping %d node(s): %s",
-                         len(skipped), ", ".join(skipped))
-
-        # Step 6: SSH-fanout poweroff.
-        targets = [
-            SshTarget(
-                host=h,
-                user=self.cfg.ssh_user,
-                key_path=self.cfg.ssh_key,
-                poweroff_cmd=self.cfg.poweroff_cmd,
-            )
-            for h in resolved
-        ]
-        await poweroff_all(targets, dry_run=self.cfg.dry_run)
-
-        # Step 6b: power off projectors/displays. First cancel any in-flight
-        # power-on so POWR 1 can't race our POWR 0 to the same device; then
-        # run the power-off CONCURRENTLY with the reachability poll below, so
-        # a slow/unreachable projector never adds latency to the
-        # safety-critical sequence. power_off_all() isolates per-device errors.
-        # Also cancel any pending auto-play so a GO can't fire mid-shutdown
+        # Cancel any in-flight power-on so POWR 1 can't race our POWR 0 to the
+        # same device, and any pending auto-play so a GO can't fire mid-shutdown
         # (this path does NOT go through stop(); it cancels tasks directly).
         await self._cancel_auto_play_task()
         await self._cancel_projector_on_task()
-        projector_off_task: asyncio.Task | None = None
-        if self.cfg.projector_power_off_on_shutdown and self.displays.configured:
-            projector_off_task = asyncio.create_task(
-                self.displays.power_off_all(), name="projector-power-off"
-            )
 
-        # Step 7: reachability poll (projectors power off in parallel).
-        #
-        # This runs whenever the sequence proceeds with targets, including a
-        # list shorter than the map implies. It used to be guarded by
-        # `if resolved:`, which meant that the one case where the target list
-        # was wrong — empty — also skipped the check that would have caught it.
-        # A verification step does not get to opt out on the anomalous path.
-        if resolved:
-            self._set_state("polling")
-            result = await wait_until_all_down(
-                resolved,
-                interval_s=2.0,
-                max_wait_s=self.cfg.shutdown_max_wait_s,
-            )
-            self._nodes_pending = list(result.stuck_hosts)
-            if result.timed_out:
-                log.warning(
-                    "shutdown: reachability timeout (%.1fs), proceeding anyway "
-                    "with stuck hosts: %s", result.elapsed_s,
-                    ", ".join(result.stuck_hosts),
-                )
-        else:
-            # Only reachable in Case 1 (the caller refuses every other empty
-            # selection). Stated rather than silent.
-            log.info("shutdown: no nodes to poll (controller-only cluster)")
+        display_task = asyncio.create_task(
+            cluster_shutdown.run_display_stage(ctx), name="projector-power-off"
+        )
+        node_outcome = await cluster_shutdown.run_node_stage(
+            ctx, selection, pre_pass=False, max_wait_s=self.cfg.shutdown_max_wait_s,
+        )
+        self._nodes_pending = list(node_outcome.stuck_hosts)
 
-        # Join the projector power-off, bounded so a hung projector cannot
-        # stall the sequence (cap = its full retry budget + margin).
-        if projector_off_task is not None:
-            budget = 3 * self.cfg.projector_command_timeout_s + 5
-            try:
-                await asyncio.wait_for(projector_off_task, timeout=budget)
-            except asyncio.TimeoutError:
-                log.warning("projector power-off exceeded %.0fs; continuing shutdown",
-                            budget)
-            except Exception:
-                log.exception("projector power-off failed; continuing shutdown")
+        # Join the display stage, bounded so a hung projector cannot stall the
+        # sequence (cap = its full retry budget + margin).
+        budget = 3 * self.cfg.projector_command_timeout_s + 5
+        try:
+            await asyncio.wait_for(display_task, timeout=budget)
+        except asyncio.TimeoutError:
+            log.warning("projector power-off exceeded %.0fs; continuing shutdown", budget)
+        except Exception:
+            log.exception("projector power-off failed; continuing shutdown")
 
         # Step 8: arm Shelly hardware safety timer.
         self._set_state("arming-shelly")
@@ -620,6 +598,14 @@ class Bridge:
             )
 
         # Step 10: local controller poweroff/reboot.
+        #
+        # Release the sequence lock FIRST. This command re-enters the same
+        # sequence through the systemd transition (cuems-cluster-poweroff's
+        # ExecStop), and a still-held lock would make that wrapper refuse and
+        # run neither stage. By here every irreversible step is done: the nodes
+        # are commanded off and confirmed, and the mains-cut deadline exists.
+        if lock is not None:
+            lock.release()
         # Use controller_poweroff_cmd if set (e.g. "sudo systemctl reboot"
         # for safe testing when WoL-from-S5 is unreliable), otherwise fall
         # back to poweroff_cmd (the same command used to SSH-poweroff nodes).

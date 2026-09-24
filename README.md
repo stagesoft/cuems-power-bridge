@@ -903,6 +903,75 @@ failure).
 
 ---
 
+#### `cuems-power-bridge-config`
+
+Print one value from `/etc/cuems/power-bridge.conf`, applying the same
+bundled-default-then-`/etc` layering the daemon itself uses.
+
+```
+cuems-power-bridge-config --get <key> [--config PATH]
+```
+
+It exists so shell scripts in other packages need no Python of ours:
+`cuems-common`'s `cuems-displays-on` reads `projector_power_on_on_start` and
+`shared_token` through it. The **key** is the argument, never the value, so a
+token never reaches `argv` where `ps` would show it.
+
+Exit status: `0` with the value on stdout, **including an empty value** — a
+legitimate configuration a caller branches on. `3` for an unknown key or for a
+`--config` path that does not exist. A missing *default* configuration file is
+not an error: the daemon falls back to defaults there, and the query answers
+what the daemon would use.
+
+#### The cluster power-off helper (internal)
+
+There is deliberately **no operator command** for the power-off sequence. The
+one command that powers the venue down is `cuems-common`'s existing
+`cuems-cluster-poweroff [--force]`, and it invokes this package as a module:
+
+```
+"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff --stage {displays|nodes} …
+```
+
+Invoking it that way — rather than through a command on `PATH` — keeps the
+`venv_python` override in `/etc/cuems/cluster-poweroff.conf` working, keeps
+that script's "is the bridge installed?" guard working unchanged, and means no
+second way to power a venue down was created.
+
+**What it never does**: arm the Shelly relay, pre-check it, or power this
+controller off. Those belong to `POST /shutdown`, which *ends* by triggering
+the systemd transition that runs the helper — a shared sequence containing them
+would arm the relay twice per shutdown. The helper runs the two stages and
+returns; systemd finishes the job.
+
+**Exit status**, which the wrapper turns into log lines: `0` complete
+(including "nothing to do"), `1` usage, `3` precondition, `4` refused, `5` ran
+but some machine never went quiet. The wrapper still exits `0` on every path
+that runs during a power-off transition — an `ExecStop` that fails would fail
+the stop it belongs to.
+
+##### Rehearsing, and the running-show guard
+
+`cuems-cluster-poweroff --force` runs the sequence outside a poweroff
+transaction; combine it with `dry_run = true` in `power-bridge.conf` for a
+zero-risk rehearsal.
+
+A **manual** run refuses while a project is playing:
+
+```
+sudo cuems-cluster-poweroff --force                  # refuses if a show is running
+sudo cuems-cluster-poweroff --force --while-playing  # proceeds, and says so in the journal
+```
+
+It fails open — an unreachable daemon, an unknown engine state, or a dry run
+all proceed with a warning, because a wedged engine is exactly the recovery
+case a manual run exists for.
+
+> **A power-off transaction never asks.** The wall switch, the power button and
+> `systemctl poweroff` pass no guard at all, so **the venue can always be
+> powered off mid-show** — one of the wall switch's primary intents. The guard
+> is requested by the caller, and only the manual path requests it.
+
 #### `cuems-wsclient` (legacy)
 
 One-shot legacy CLI: loads a project via the editor WebSocket then sends GO via the engine

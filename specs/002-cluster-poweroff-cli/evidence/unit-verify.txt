@@ -1,0 +1,14 @@
+# T036a — unit and wrapper verification
+# Date: 2026-09-24T08:48:35+00:00
+
+$ systemd-analyze verify ../cuems-common/etc/systemd/system/cuems-cluster-poweroff.service
+cuems-cluster-poweroff.service: Command /usr/bin/cuems-cluster-poweroff is not executable: No such file or directory
+
+# The only diagnostic is that /usr/bin/cuems-cluster-poweroff is not installed
+# on this development box — the script lives in the checkout. The unit itself
+# parses clean: no directive errors, no ordering complaints.
+
+$ bash -n ../cuems-common/usr/bin/cuems-cluster-poweroff
+ok
+$ bash -n ../cuems-common/usr/bin/cuems-displays-on
+ok

@@ -1,0 +1,6 @@
+# T001 — baseline suite before feature 002
+# Date:   2026-09-23T17:46:24+00:00
+# Commit: ac46f78 on 002-cluster-poweroff-cli
+
+
+============================= 185 passed in 16.69s =============================

@@ -155,6 +155,9 @@ class Selection:
     adopted_count: int = 0                     # of those, adopted
     skipped: list[Skip] = field(default_factory=list)
     partial: bool = False                      # some intended target is unresolvable
+    #: The nodes this selection was computed from, so a caller can corroborate
+    #: self-exclusion by address and name (cluster_shutdown.exclude_self).
+    nodes: list = field(default_factory=list)
 
     @property
     def unresolvable(self) -> list[Skip]:
@@ -358,6 +361,7 @@ def shutdown_targets(
         mode="forced_all" if include_unadopted else "adopted",
         found=len(others),
         adopted_count=len(adopted),
+        nodes=list(others),
     )
     if not others:
         sel.mode = "controller_only"

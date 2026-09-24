@@ -1,5 +1,42 @@
 cuems-power-bridge (0.3.1-1) unstable; urgency=medium
 
+  * cluster power-off: the sequence's two stage bodies and its node selection
+    move into cuemspowerbridge.cluster_shutdown, shared by POST /shutdown and
+    by cuems-common's ExecStop hook, so the wall switch and the API cannot
+    disagree about a cluster. The relay and the local poweroff stay with
+    /shutdown: the hook must do neither, and /shutdown ends by triggering the
+    transition that runs the hook, so a shared sequence would arm the relay
+    twice per shutdown. The hook reaches this package as
+    `python -m cuemspowerbridge.scripts.cluster_poweroff` — a module, not a
+    PATH command — which keeps cluster-poweroff.conf's interpreter override and
+    its missing-bridge guard working, and means no second operator command to
+    power a venue down was created. 221 lines of this package's Python leave
+    cuems-common's shell script, where no test could reach them.
+  * shutdown: one flock on /run/cuems-power-bridge/shutdown.lock now covers a
+    whole power-off sequence across processes — the daemon's asyncio lock could
+    not see the ExecStop helper, nor it the daemon. The wrapper holds it across
+    both stages; the daemon takes it too and RELEASES it before the local
+    poweroff, because that command re-enters the same sequence through systemd
+    and a still-held lock would make the wrapper run neither stage. A new
+    tmpfiles rule creates the directory: /run is root-owned, so the daemon
+    (User=cuems) could not create it itself.
+  * shutdown: the display stage now honours projector_power_off_on_shutdown,
+    skips a fleet that is already off or cooling, and skips one where no device
+    answers — three gates the ExecStop path has always had and this daemon
+    never did. Each can only reduce what is commanded.
+  * shutdown: node self-exclusion moves into the shared stage, so the daemon
+    inherits the address and hostname tests it never had. They exist to catch a
+    second map entry describing this host under a different uuid; the address
+    test is exact set membership, never a substring.
+  * ssh: both initiators now share one host-key store,
+    /var/lib/cuems/.ssh/known_hosts, pinned with -o UserKnownHostsFile. Without
+    it the daemon (as cuems) and the transition (as root) kept separate stores,
+    so a re-imaged node could be trusted by one and unknown to the other —
+    discovered mid-shutdown. NB this re-learns the fleet once under accept-new.
+  * new cuems-power-bridge-config --get <key>: a read-only query so
+    cuems-common's shell scripts need none of this package's Python. The key is
+    the argument, never the value, so a token never reaches argv.
+
   * network_map: the private ElementTree reader is REPLACED by cuemsutils'
     public configuration path. The old reader filtered nodes on the string
     "NodeType.slave"; cuems-utils feature 007 renamed that element to

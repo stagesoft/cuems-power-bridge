@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Shim for the read-only configuration query. The venv-installed entry lives
+# at /usr/lib/cuems/bin/. NB there is deliberately NO shim for the cluster
+# power-off helper: it is internal, invoked by cuems-cluster-poweroff through
+# the interpreter that package configures, so exactly one command powers the
+# venue down.
+exec /usr/lib/cuems/bin/cuems-power-bridge-config "$@"

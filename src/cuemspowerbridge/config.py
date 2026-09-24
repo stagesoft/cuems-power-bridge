@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+
+from . import shutdown_lock
 from importlib import resources
 from pathlib import Path
 
@@ -89,6 +91,13 @@ class Config:
 
     # network_map
     network_map_path: str = "/etc/cuems/network_map.xml"
+    # Cross-process power-off lock. One sequence at a time per MACHINE: the
+    # daemon, the ExecStop wrapper and the helper all take this one file.
+    # Overridable so the suite never depends on /run existing.
+    # default_factory, not a plain default: a dataclass default is captured at
+    # class-creation time, which would make the path unpatchable for tests.
+    shutdown_lock_path: str = field(
+        default_factory=lambda: shutdown_lock.DEFAULT_LOCK_PATH)
 
     # Projectors / displays (see the displays/ subpackage). Global toggles
     # here; per-device config is in projector.N.* keys, captured in `extras`
