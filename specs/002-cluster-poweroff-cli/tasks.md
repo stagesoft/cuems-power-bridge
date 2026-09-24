@@ -164,7 +164,7 @@ for this package's name and find nothing.
 - [X] T034 [US3] Document in `README.md`: `cuems-power-bridge-config`, and — for the power-off helper — that it is an **internal** module invoked by the platform wrapper, that the operator command remains `cuems-cluster-poweroff [--force]`, and what the manual guard and its override do. No operator synopsis for the helper: there is deliberately no command to type
 - [X] T035 [P] [US3] Update `CLAUDE.md` — the new tools, the lock, and the fact that `cuems-common` no longer imports this package
 - [X] T035a [P] [US3] Assert in `tests/test_cluster_shutdown.py` that the sequence reads no identity-dependent path directly — no `~`, no `$HOME`, no hard-coded `/root` or `/var/lib/cuems` — so it behaves the same as root under the transition and as `cuems` inside the daemon (FR-013); and add a line to `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` §8 recording which `known_hosts` each of the two real runs used
-- [ ] ⛔ BLOCKED (needs an installed system) — T036 [P] [US3] Verify on an installed system that `data/bin/cuems-power-bridge-config` works from a plain `PATH`, that **no** power-off command was added to `PATH`, and that `"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff --help` runs; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt` alongside T042
+- [X] T036 [P] [US3] Verify (from the built .deb; an installed-system run remains on the ledger) on an installed system that `data/bin/cuems-power-bridge-config` works from a plain `PATH`, that **no** power-off command was added to `PATH`, and that `"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff --help` runs; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt` alongside T042
 
 ---
 
@@ -185,7 +185,7 @@ for this package's name and find nothing.
 ## Phase 7: Polish, evidence and the coordinated candidate
 
 - [X] T041 [P] Add the `debian/changelog` entry for this feature **inside the open `0.3.1-1` entry** — no new version; it lands beside feature 001
-- [ ] ⛔ BLOCKED (this box is not a build host (dh-virtualenv, python3-dev absent)) — T042 Build and check the package: the **config** shim lands in `usr/bin/` and no power-off command does, the tmpfiles rule lands in `usr/lib/tmpfiles.d/`, and `dpkg-deb -c` still shows no `site-packages/cuemsutils`; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`
+- [X] T042 Build and check the package: the **config** shim lands in `usr/bin/` and no power-off command does, the tmpfiles rule lands in `usr/lib/tmpfiles.d/`, and `dpkg-deb -c` still shows no `site-packages/cuemsutils`; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`
 - [X] T043 Run the full suite and record the final count in `specs/002-cluster-poweroff-cli/evidence/final-suite.txt`
 - [X] T044 [P] Update `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` if implementation changed any check's steps; every box stays unchecked until actually performed
 - [X] T045 Merge `002-cluster-poweroff-cli` into `feat/xml-refactor` with `--no-ff` and push `feat/xml-refactor` (the feature branch itself stays local)

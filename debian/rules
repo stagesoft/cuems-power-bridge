@@ -60,6 +60,23 @@ override_dh_fixperms:
 	find debian/cuems-power-bridge/usr/lib/cuems/bin -name "pip*" -delete
 	find debian/cuems-power-bridge/usr/lib/cuems/bin -name "python*" -delete
 	find debian/cuems-power-bridge/usr/lib/cuems/bin -name "wheel*" -delete
+	# Console scripts belonging to OTHER packages' dependencies. pip installs
+	# an entry point for every distribution it resolves, so the build pulls in
+	# scripts from cuemsutils, xmlschema, peewee and cffi — and /usr/lib/cuems
+	# is SHARED, so shipping them means `dpkg -i` refuses with "trying to
+	# overwrite ... also in package cuems-utils". Found by inspecting a built
+	# .deb: the site-packages strip above never covered bin/.
+	#
+	# Keep ONLY this package's own entry points; the venv interpreter itself is
+	# removed above and comes from cuems-utils.
+	find debian/cuems-power-bridge/usr/lib/cuems/bin -mindepth 1 -maxdepth 1 \
+		! -name "cuems-power-bridge" \
+		! -name "cuems-power-bridge-config" \
+		! -name "cuems-power-bridge-deploy-keys" \
+		! -name "cuems-power-bridge-install-mjs" \
+		! -name "cuems-power-bridge-test-projector" \
+		! -name "cuems-wsclient" \
+		-exec rm -rf {} +
 	rm -f debian/cuems-power-bridge/usr/lib/cuems/pyvenv.cfg
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/_virtualenv.*
 	rm -rf debian/cuems-power-bridge/usr/lib/cuems/lib/python3.11/site-packages/_distutils_hack

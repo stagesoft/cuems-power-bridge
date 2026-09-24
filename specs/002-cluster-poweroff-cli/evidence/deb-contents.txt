@@ -1,0 +1,64 @@
+# T042 — the built package, and the shared-venv gate
+# Date:   2026-09-24T10:24:53+00:00
+# Commit: ca67a99
+# Host:   development box (NOT a controller — see the caveats below)
+
+$ dpkg-buildpackage -b -uc -us
+  -> ../cuems-power-bridge_0.3.1-1_all.deb  (396340 bytes)
+  cuemsutils resolved from ../cuems-utils ce5b5b0 (not on PyPI)
+
+## Nothing another CUEMS package ships is bundled
+  site-packages/cuemsutils   0  (must be 0)
+  site-packages/websockets     0
+  site-packages/pythonosc      0
+  site-packages/xmlschema      0
+  site-packages/lxml           0
+  site-packages/peewee         0
+  site-packages/pynng          0
+  site-packages/elementpath    0
+  site-packages/timecode       0
+  site-packages/aiohttp      77  (unique to this package; must be > 0)
+
+## The shared venv's bin/ holds only this package's entry points
+  cuems-power-bridge
+  cuems-power-bridge-config
+  cuems-power-bridge-deploy-keys
+  cuems-power-bridge-install-mjs
+  cuems-power-bridge-test-projector
+  cuems-wsclient
+
+## On PATH
+  
+  cuems-power-bridge
+  cuems-power-bridge-config
+  cuems-power-bridge-deploy-keys
+  cuems-power-bridge-install-mjs
+  cuems-power-bridge-test-projector
+  (no power-off command: the helper is a module, invoked by cuems-common)
+
+## tmpfiles
+  ./usr/lib/tmpfiles.d/
+  ./usr/lib/tmpfiles.d/cuems-power-bridge.conf
+
+## Version
+  .deb:            0.3.1-1
+  python package:  cuemspowerbridge-0.3.1.dist-info
+
+## TWO DEFECTS FOUND BY INSPECTING THE FIRST BUILD, both fixed here
+  1. /usr/lib/cuems/bin also held cuems-convert-documents, cffi-gen-src,
+     pwiz.py and three xmlschema-* scripts — entry points of OTHER
+     distributions that pip installs for every resolved dependency. The venv
+     is SHARED, and cuems-utils declares cuems-convert-documents itself, so
+     dpkg -i would have refused: 'trying to overwrite ... also in package
+     cuems-utils'. debian/rules stripped site-packages but never bin/.
+  2. pyproject.toml still said 0.3.0 while the changelog said 0.3.1-1, so the
+     .deb shipped a package whose own metadata disagreed with it.
+
+## WHY THIS ARTIFACT IS STILL NOT SHIPPABLE
+  - built on a development box, not the controller (CLAUDE.md);
+  - --use-system-packages means anything in THIS host's dist-packages is
+    treated as satisfied and silently omitted. Nothing was omitted this
+    time, but the build is only as good as the host matching the target;
+  - dependencies are unpinned: aiohttp >=3.9 resolved to 3.14.3 TODAY;
+  - the cuemsutils wheel came from a working tree, not a tagged release;
+  - unsigned (-uc -us).

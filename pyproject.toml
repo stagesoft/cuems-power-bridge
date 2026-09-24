@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "cuemspowerbridge"
-version = "0.3.0"
+version = "0.3.1"
 description = "CUEMS power bridge: Shelly + Companion shutdown coordinator and engine WebSocket client"
 readme = "README.md"
 license = "GPL-3.0-or-later"

@@ -42,8 +42,13 @@ performed, and can be deleted once they are.
 
 ## 1. Feature 001 T053 — the built package bundles nothing another package ships
 
-- [ ] **Not performed.** Needs a build host (`dh-virtualenv`, `python3-dev`); the development
-      box has neither.
+- [x] **Performed 2026-09-24 on the development box** once its build dependencies were
+      installed — see `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`. The gate
+      passes, and the build found two packaging defects that are now fixed (foreign console
+      scripts in the shared `bin/`, and a stale `pyproject.toml` version).
+      **Still to do on the controller**: the same build there, because
+      `--use-system-packages` makes a build only as trustworthy as the host matching the
+      target.
 
 **Do**: `dpkg-buildpackage -b -uc -us` on the controller, then
 `dpkg-deb -c ../cuems-power-bridge_*.deb`, asserting **no** `site-packages/cuemsutils*` and
