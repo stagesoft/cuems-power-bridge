@@ -188,15 +188,15 @@ for this package's name and find nothing.
 - [ ] ⛔ BLOCKED (this box is not a build host (dh-virtualenv, python3-dev absent)) — T042 Build and check the package: the **config** shim lands in `usr/bin/` and no power-off command does, the tmpfiles rule lands in `usr/lib/tmpfiles.d/`, and `dpkg-deb -c` still shows no `site-packages/cuemsutils`; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`
 - [X] T043 Run the full suite and record the final count in `specs/002-cluster-poweroff-cli/evidence/final-suite.txt`
 - [X] T044 [P] Update `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` if implementation changed any check's steps; every box stays unchecked until actually performed
-- [ ] T045 Merge `002-cluster-poweroff-cli` into `feat/xml-refactor` with `--no-ff` and push `feat/xml-refactor` (the feature branch itself stays local)
+- [X] T045 Merge `002-cluster-poweroff-cli` into `feat/xml-refactor` with `--no-ff` and push `feat/xml-refactor` (the feature branch itself stays local)
 
 ### The candidate tag — last, and only once both halves are on their integration branches
 
-- [ ] T046 Verify the candidate is coherent before tagging: `feat/xml-refactor` here contains features 001 and 002; `../cuems-common`'s `feat/xml-refactor` contains both of its halves; both are pushed and level with `origin`
-- [ ] T047 Create `xml-refactor-merge-candidate` in this repository at the `feat/xml-refactor` merge commit (this repository has no such tag yet) and push it: `git tag -a xml-refactor-merge-candidate -m "<what the candidate contains>" && git push origin xml-refactor-merge-candidate`
+- [X] T046 Verify the candidate is coherent before tagging: `feat/xml-refactor` here contains features 001 and 002; `../cuems-common`'s `feat/xml-refactor` contains both of its halves; both are pushed and level with `origin`
+- [X] T047 Create `xml-refactor-merge-candidate` in this repository at the `feat/xml-refactor` merge commit (this repository has no such tag yet) and push it: `git tag -a xml-refactor-merge-candidate -m "<what the candidate contains>" && git push origin xml-refactor-merge-candidate`
 - [ ] T048 **Relocate** `xml-refactor-merge-candidate` in `../cuems-common` from `f2fc0f5` — which predates even feature 001's half — to its current `feat/xml-refactor` head, and force-push the moved tag. **Moving a published tag is outward-facing and rewrites what other checkouts see: confirm with the user before pushing**, and record the old and new commits in the message
-- [ ] T049 [P] Record the candidate's composition in `specs/002-cluster-poweroff-cli/evidence/candidate.md`: each repository, its version, its tagged commit, and which features it carries — the sheet a technician reads before starting the hardware ledger
-- [ ] T050 Cross-check the ecosystem's tags with `git -C <repo> log --oneline -1 xml-refactor-merge-candidate` for `.`, `../cuems-common`, `../cuems-nodeconf` (expect `6c0cca7`, 0.1.0-8) and `../cuems-utils`; record the four results in `specs/002-cluster-poweroff-cli/evidence/candidate.md`. A tag not pointing at the reviewed head is a finding, not a formality
+- [X] T049 [P] Record the candidate's composition in `specs/002-cluster-poweroff-cli/evidence/candidate.md`: each repository, its version, its tagged commit, and which features it carries — the sheet a technician reads before starting the hardware ledger
+- [X] T050 Cross-check the ecosystem's tags with `git -C <repo> log --oneline -1 xml-refactor-merge-candidate` for `.`, `../cuems-common`, `../cuems-nodeconf` (expect `6c0cca7`, 0.1.0-8) and `../cuems-utils`; record the four results in `specs/002-cluster-poweroff-cli/evidence/candidate.md`. A tag not pointing at the reviewed head is a finding, not a formality
 
 ---
 
