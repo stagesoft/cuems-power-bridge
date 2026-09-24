@@ -29,6 +29,8 @@ a poweroff transaction cannot reach it even by accident.
 from __future__ import annotations
 
 import logging
+import socket
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -143,6 +145,84 @@ async def run_display_stage(ctx: StageContext) -> StageOutcome:
 
 
 # ---------------------------------------------------------------------------
+# Self-exclusion
+# ---------------------------------------------------------------------------
+
+
+def _local_addresses() -> set[str]:
+    """Every address on this host, both families, as exact strings."""
+    addrs: set[str] = set()
+    try:
+        out = subprocess.run(["ip", "-o", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception as e:  # noqa: BLE001 - diagnostic only
+        log.warning("could not enumerate local addresses (%s)", e)
+        return addrs
+    for line in out.splitlines():
+        fields = line.split()
+        for i, tok in enumerate(fields):
+            if tok in ("inet", "inet6") and i + 1 < len(fields):
+                addrs.add(fields[i + 1].split("/")[0])
+    return addrs
+
+
+def _resolve(name: str) -> set[str]:
+    """Resolve through NSS, so nss-mdns/avahi answers `.local`. Both families."""
+    try:
+        return {ai[4][0] for ai in socket.getaddrinfo(name, None)}
+    except OSError:
+        return set()
+
+
+def exclude_self(targets: list[str], nodes: list) -> tuple[list[str], list[tuple[str, str]]]:
+    """Drop this host from its own power-off list. Returns (kept, [(name, why)]).
+
+    Three tests, in order. The first is normally sufficient — the adapter
+    already excludes the entry whose uuid is this host's — so the other two
+    look redundant, and are not: they catch **a second entry describing this
+    host under a different uuid**, the duplicate-node shape cuems-nodeconf's
+    MAC-keyed merge once produced. A missed self-entry is expensive twice
+    over: SSHing `poweroff` to yourself mid-transition, and then never
+    observing yourself go down, which burns the entire wait on every
+    power-off.
+
+    Address matching is EXACT set membership, never a substring test:
+    `10.16.10.1` is a substring of `10.16.10.10`.
+    """
+    if not targets:
+        return targets, []
+
+    self_uuids = {v.uuid for v in nodes if getattr(v, "is_self", False)}
+    by_name = {v.avahi: v for v in nodes if getattr(v, "avahi", None)}
+    mine = _local_addresses()
+    my_names = {socket.gethostname().lower(), socket.getfqdn().lower()}
+
+    kept: list[str] = []
+    excluded: list[tuple[str, str]] = []
+    for name in targets:
+        view = by_name.get(name)
+        reason = None
+        if view is not None and view.uuid in self_uuids:
+            reason = f"uuid {view.uuid} is this host"
+        else:
+            ips = _resolve(name)
+            shared = ips & mine
+            if shared:
+                reason = f"resolves to a local address ({', '.join(sorted(shared))})"
+            elif ips and all(ip.startswith("127.") or ip == "::1" for ip in ips):
+                reason = "resolves to loopback"
+            elif (name.split(".")[0].lower() in my_names
+                  or (getattr(view, "role_id", "") or "").lower() in my_names):
+                reason = "name is this host"
+        if reason:
+            log.info("SELF-EXCLUDED %s: %s", name, reason)
+            excluded.append((name, reason))
+        else:
+            kept.append(name)
+    return kept, excluded
+
+
+# ---------------------------------------------------------------------------
 # Stage 2 — cluster nodes
 # ---------------------------------------------------------------------------
 
@@ -205,6 +285,14 @@ async def run_node_stage(
         "partial": selection.partial,
         "skipped": [(k.label, k.reason.value) for k in selection.skipped],
     })
+
+    resolved, self_excluded = exclude_self(resolved, list(selection.nodes))
+    if self_excluded:
+        outcome.targeted = list(resolved)
+        if not resolved:
+            log.info("shutdown: every target was this host — nothing to power off")
+            ctx.progress("nothing-to-poll", {"reason": "all_self"})
+            return outcome
 
     alive = resolved
     if pre_pass and resolved:
