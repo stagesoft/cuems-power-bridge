@@ -48,6 +48,10 @@ cuems-power-bridge = "cuemspowerbridge.scripts.power_bridge:main"
 cuems-power-bridge-deploy-keys = "cuemspowerbridge.scripts.deploy_keys:main"
 cuems-power-bridge-install-mjs = "cuemspowerbridge.scripts.install_shelly_mjs:main"
 cuems-power-bridge-test-projector = "cuemspowerbridge.scripts.test_projector:main"
+# Read-only query so cuems-common's shell scripts need no Python of ours.
+# The cluster power-off helper deliberately has NO console entry: it is
+# internal, run as `python -m cuemspowerbridge.scripts.cluster_poweroff`.
+cuems-power-bridge-config = "cuemspowerbridge.scripts.config_get:main"
 cuems-wsclient = "cuemspowerbridge.wsclient:main_cli"
 
 [tool.pytest.ini_options]

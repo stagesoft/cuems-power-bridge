@@ -10,6 +10,7 @@ data/bin/cuems-power-bridge usr/bin/
 data/bin/cuems-power-bridge-deploy-keys usr/bin/
 data/bin/cuems-power-bridge-install-mjs usr/bin/
 data/bin/cuems-power-bridge-test-projector usr/bin/
+data/bin/cuems-power-bridge-config usr/bin/
 
 # Runtime directory for the power-off sequence lock. systemd-tmpfiles creates it
 # at boot; the postinst creates it for the current boot too.
