@@ -11,6 +11,13 @@ undeclared venv library surface that `cuems-common` drives today (feature 001,
 `xml-refactor-merge-candidate` (this repository at `0.3.1-1`, `cuems-common` at `1.3.0-23`),
 argv and exit codes are the whole boundary between the two packages.
 
+**Status 2026-09-24 — discharged.** `cuems-common` `3af31cc` deleted both
+heredocs and the two Python one-liners; neither of its scripts imports this
+package any more. Feature 001's `contracts/venv-library-surface.md` stays as
+written — it is a merged feature's record — but the surface it froze is no
+longer an external contract. The code remains as internal API, used by the
+daemon and by the helper.
+
 Both tools follow this repository's existing CLI shape: implementation in
 `src/cuemspowerbridge/scripts/<name>.py` with a usage + exit-status docstring, a
 `[tool.poetry.scripts]` entry, a POSIX-sh shim in `data/bin/<name>` that `exec`s the venv
