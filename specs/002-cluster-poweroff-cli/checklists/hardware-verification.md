@@ -55,6 +55,27 @@ goes too far it removes a module another component needs at its next restart.
 
 **Why the suite cannot**: the suite never builds a package.
 
+## 1a. The build needs the cuems-utils checkout, not PyPI
+
+- [ ] **Not performed** (same build host as §1).
+
+**Do**: build with `../cuems-utils` present, or
+`dpkg-buildpackage -b -uc -us` after `CUEMS_UTILS_SRC=/path/to/cuems-utils`. Confirm the log
+shows the wheel being built and the commit it came from, and that
+`dpkg-deb -c` still contains **no** `cuemsutils` (§1).
+
+**Proves**: the dependency feature 001 made real and bounded can actually be resolved.
+`cuemsutils >=0.1.0rc16` **is not on PyPI** — the newest published there is `0.1.0rc14` — so
+`debian/rules` builds a wheel from the sibling checkout and points pip at it with
+`--find-links`. Without that the build fails at dependency resolution, on any host.
+
+**Why the suite cannot**: it imports the library from the checkout already; only a package
+build resolves versions.
+
+**Note**: the wheel exists purely to satisfy resolution — `override_dh_fixperms` strips
+`cuemsutils*` back out, because `cuems-utils` ships it into the shared venv and two copies
+would collide on `dpkg -i`.
+
 ## 2. Feature 001 T054 — the identity document is actually shipped
 
 - [ ] **Not performed.**

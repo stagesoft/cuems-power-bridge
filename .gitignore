@@ -18,3 +18,7 @@ debian/debhelper-build-stamp
 # uv is only a test runner here (the project builds with Poetry); its lock
 # file is a local artifact, not project state.
 uv.lock
+
+# Wheel built from the ../cuems-utils checkout at build time so pip can resolve
+# cuemsutils >=0.1.0rc16, which is not on PyPI. Stripped from the .deb again.
+debian/.cuemsutils-wheel/

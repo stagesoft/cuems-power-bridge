@@ -7,17 +7,47 @@ export DH_VIRTUALENV_INSTALL_ROOT=/usr/lib
 # the package, producing a .deb that crashes at runtime with ModuleNotFound.
 export PYTHONNOUSERSITE=1
 
+# cuemsutils is a real, bounded dependency (>=0.1.0rc16,<0.1.1) since feature
+# 001, and that version is NOT on PyPI — the newest published there is
+# 0.1.0rc14. It is built from the sibling checkout instead, whose
+# feat/xml-refactor branch carries the node model, the schemas and the
+# settings.xml this package now depends on.
+#
+# The wheel is only needed to RESOLVE the dependency: override_dh_fixperms
+# strips cuemsutils* straight back out, because cuems-utils ships it into the
+# shared venv and two copies would collide on `dpkg -i`.
+CUEMS_UTILS_SRC ?= $(CURDIR)/../cuems-utils
+WHEELDIR = $(CURDIR)/debian/.cuemsutils-wheel
+
 %:
 	dh $@ --with python-virtualenv
 
-override_dh_virtualenv:
-	# Install into the shared venv at /usr/lib/cuems (created by cuems-utils)
+$(WHEELDIR)/.stamp:
+	@if [ ! -d "$(CUEMS_UTILS_SRC)" ]; then \
+		echo "ERROR $(CUEMS_UTILS_SRC) not found."; \
+		echo "      cuemsutils >=0.1.0rc16 is not on PyPI (newest there: 0.1.0rc14),"; \
+		echo "      so the build needs the cuems-utils checkout beside this one, or"; \
+		echo "      CUEMS_UTILS_SRC=/path/to/cuems-utils on the make command line."; \
+		exit 1; \
+	fi
+	@echo "building cuemsutils wheel from $(CUEMS_UTILS_SRC)"
+	@git -C "$(CUEMS_UTILS_SRC)" log --oneline -1 2>/dev/null \
+		| sed 's/^/  cuems-utils at /' || true
+	mkdir -p $(WHEELDIR)
+	cd "$(CUEMS_UTILS_SRC)" && python3 -m pip wheel --no-deps --wheel-dir "$(WHEELDIR)" .
+	touch $@
+
+override_dh_virtualenv: $(WHEELDIR)/.stamp
+	# Install into the shared venv at /usr/lib/cuems (created by cuems-utils).
+	# --find-links lets pip resolve cuemsutils from the sibling build above;
+	# the index stays enabled, so every other dependency still comes from PyPI.
 	dh_virtualenv --python python3 \
 		--install-suffix cuems \
-		--use-system-packages
+		--use-system-packages \
+		--extra-pip-arg "--find-links=$(WHEELDIR)"
 
 override_dh_auto_clean:
-	rm -rf build *.egg-info src/*.egg-info
+	rm -rf build *.egg-info src/*.egg-info $(WHEELDIR)
 	find . -name '*.pyc' -delete
 	find . -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 	dh_auto_clean
