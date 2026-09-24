@@ -21,6 +21,11 @@ same machines**. This one covers what only a controller running the bridge can p
 across `tasks.md` and `evidence/README.md`, countable only by reading both. Two of them are
 the difference between "the power-off works" and "the power-off reports that it worked".
 
+**The local branch `002-cluster-poweroff-cli` is kept until this ledger is worked.** It is
+fully merged into `feat/xml-refactor` (`d5c4226`) and was never pushed, per this repository's
+convention; it stays as a convenient checkout of the feature in isolation while the checks are
+performed, and can be deleted once they are.
+
 ---
 
 ## Order of work on a controller
