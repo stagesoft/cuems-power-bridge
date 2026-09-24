@@ -327,3 +327,14 @@ def test_the_shared_module_never_consults_the_engine():
     for forbidden in ("engine", "EngineClient", "project_running", "project_loaded"):
         assert forbidden not in toks, f"the shared stages must not reference {forbidden!r}"
     assert not {t for t in toks if "8478" in t or "/status" in t}
+
+
+def test_the_stages_read_no_identity_dependent_path():
+    """T035a / FR-013 — the same code runs as root under the transition and as
+    `cuems` inside the daemon, so it must not reach for either one's HOME. The
+    SSH host-key store is pinned explicitly in node_executor for the same
+    reason."""
+    toks = _code_tokens()
+    for forbidden in ("expanduser", "HOME", "/root", "/var/lib/cuems"):
+        assert not {t for t in toks if forbidden in str(t)}, \
+            f"the stages must not reach for {forbidden!r}"

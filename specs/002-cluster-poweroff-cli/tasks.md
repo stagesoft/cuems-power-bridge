@@ -161,9 +161,9 @@ for this package's name and find nothing.
 - [X] T031 [P] [US3] Implement the running-show guard in `src/cuemspowerbridge/scripts/cluster_poweroff.py`: **only when `--refuse-if-running` is passed**, probe `GET /status` and refuse with exit 4 when `engine_state == "running"`, naming the project; `--while-playing` proceeds and logs that the override was used. Fail open — unreachable daemon, `engine_state == "unknown"`, or a `dry_run` all proceed with a WARNING (FR-015, FR-015b, research R3)
 - [X] T032 [P] [US3] Test the guard's full truth table in `tests/test_cli_poweroff.py` — not requested (never probes), requested with playing/idle/unknown/unreachable, `--while-playing`, and `dry_run` — asserting that a run without `--refuse-if-running` performs no HTTP call at all
 - [X] T033 [P] [US3] Test the exit codes and `--dry-run` in `tests/test_cli_poweroff.py`: every refusal yields 4, a stuck host yields 5, a clean rehearsal yields 0 and touches nothing
-- [ ] T034 [US3] Document in `README.md`: `cuems-power-bridge-config`, and — for the power-off helper — that it is an **internal** module invoked by the platform wrapper, that the operator command remains `cuems-cluster-poweroff [--force]`, and what the manual guard and its override do. No operator synopsis for the helper: there is deliberately no command to type
-- [ ] T035 [P] [US3] Update `CLAUDE.md` — the new tools, the lock, and the fact that `cuems-common` no longer imports this package
-- [ ] T035a [P] [US3] Assert in `tests/test_cluster_shutdown.py` that the sequence reads no identity-dependent path directly — no `~`, no `$HOME`, no hard-coded `/root` or `/var/lib/cuems` — so it behaves the same as root under the transition and as `cuems` inside the daemon (FR-013); and add a line to `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` §8 recording which `known_hosts` each of the two real runs used
+- [X] T034 [US3] Document in `README.md`: `cuems-power-bridge-config`, and — for the power-off helper — that it is an **internal** module invoked by the platform wrapper, that the operator command remains `cuems-cluster-poweroff [--force]`, and what the manual guard and its override do. No operator synopsis for the helper: there is deliberately no command to type
+- [X] T035 [P] [US3] Update `CLAUDE.md` — the new tools, the lock, and the fact that `cuems-common` no longer imports this package
+- [X] T035a [P] [US3] Assert in `tests/test_cluster_shutdown.py` that the sequence reads no identity-dependent path directly — no `~`, no `$HOME`, no hard-coded `/root` or `/var/lib/cuems` — so it behaves the same as root under the transition and as `cuems` inside the daemon (FR-013); and add a line to `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` §8 recording which `known_hosts` each of the two real runs used
 - [ ] T036 [P] [US3] Verify on an installed system that `data/bin/cuems-power-bridge-config` works from a plain `PATH`, that **no** power-off command was added to `PATH`, and that `"$venv_python" -m cuemspowerbridge.scripts.cluster_poweroff --help` runs; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt` alongside T042
 
 ---
@@ -174,20 +174,20 @@ for this package's name and find nothing.
 
 **Independent Test**: exercise each degradation path on a host or in a shell harness.
 
-- [ ] T036a [P] [US4] Run `systemd-analyze verify ../cuems-common/etc/systemd/system/cuems-cluster-poweroff.service` and `bash -n` over the rewritten wrapper; record both in `specs/002-cluster-poweroff-cli/evidence/unit-verify.txt` (inventory §7.6, analysis G6)
-- [ ] T037 [P] [US4] Verify `../cuems-common/usr/bin/cuems-cluster-poweroff` with the tool absent: one ERROR line, exit 0, shutdown unimpeded (`bash -n` plus a PATH-stubbed run)
-- [ ] T038 [P] [US4] Verify `enabled=false` in `../cuems-common/etc/cuems/cluster-poweroff.conf` still short-circuits `../cuems-common/usr/bin/cuems-cluster-poweroff` before either stage
-- [ ] T039 [P] [US4] Verify `nodes_off=false` in `../cuems-common/etc/cuems/cluster-poweroff.conf` still makes `../cuems-common/usr/bin/cuems-cluster-poweroff` run the display stage only
-- [ ] T040 [US4] Confirm `debian/control` here and `../cuems-common/debian/control` still carry feature 001's reciprocal `Breaks:` pair, and that this feature adds no new version relationship (research R7)
+- [X] T036a [P] [US4] Run `systemd-analyze verify ../cuems-common/etc/systemd/system/cuems-cluster-poweroff.service` and `bash -n` over the rewritten wrapper; record both in `specs/002-cluster-poweroff-cli/evidence/unit-verify.txt` (inventory §7.6, analysis G6)
+- [X] T037 [P] [US4] Verify `../cuems-common/usr/bin/cuems-cluster-poweroff` with the tool absent: one ERROR line, exit 0, shutdown unimpeded (`bash -n` plus a PATH-stubbed run)
+- [X] T038 [P] [US4] Verify `enabled=false` in `../cuems-common/etc/cuems/cluster-poweroff.conf` still short-circuits `../cuems-common/usr/bin/cuems-cluster-poweroff` before either stage
+- [X] T039 [P] [US4] Verify `nodes_off=false` in `../cuems-common/etc/cuems/cluster-poweroff.conf` still makes `../cuems-common/usr/bin/cuems-cluster-poweroff` run the display stage only
+- [X] T040 [US4] Confirm `debian/control` here and `../cuems-common/debian/control` still carry feature 001's reciprocal `Breaks:` pair, and that this feature adds no new version relationship (research R7)
 
 ---
 
 ## Phase 7: Polish, evidence and the coordinated candidate
 
-- [ ] T041 [P] Add the `debian/changelog` entry for this feature **inside the open `0.3.1-1` entry** — no new version; it lands beside feature 001
-- [ ] T042 Build and check the package: the **config** shim lands in `usr/bin/` and no power-off command does, the tmpfiles rule lands in `usr/lib/tmpfiles.d/`, and `dpkg-deb -c` still shows no `site-packages/cuemsutils`; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`
-- [ ] T043 Run the full suite and record the final count in `specs/002-cluster-poweroff-cli/evidence/final-suite.txt`
-- [ ] T044 [P] Update `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` if implementation changed any check's steps; every box stays unchecked until actually performed
+- [X] T041 [P] Add the `debian/changelog` entry for this feature **inside the open `0.3.1-1` entry** — no new version; it lands beside feature 001
+- [ ] ⛔ BLOCKED (this box is not a build host (dh-virtualenv, python3-dev absent)) — T042 Build and check the package: the **config** shim lands in `usr/bin/` and no power-off command does, the tmpfiles rule lands in `usr/lib/tmpfiles.d/`, and `dpkg-deb -c` still shows no `site-packages/cuemsutils`; record in `specs/002-cluster-poweroff-cli/evidence/deb-contents.txt`
+- [X] T043 Run the full suite and record the final count in `specs/002-cluster-poweroff-cli/evidence/final-suite.txt`
+- [X] T044 [P] Update `specs/002-cluster-poweroff-cli/checklists/hardware-verification.md` if implementation changed any check's steps; every box stays unchecked until actually performed
 - [ ] T045 Merge `002-cluster-poweroff-cli` into `feat/xml-refactor` with `--no-ff` and push `feat/xml-refactor` (the feature branch itself stays local)
 
 ### The candidate tag — last, and only once both halves are on their integration branches

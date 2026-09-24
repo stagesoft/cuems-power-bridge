@@ -151,9 +151,10 @@ decisions in-process; this compares them across two processes and two identities
 
 - [ ] **Not performed.**
 
-**Do**: with a show playing, run `cuems-cluster-poweroff --force` (the operator command —
+**Do**: with a show playing, run `sudo cuems-cluster-poweroff --force` (the operator command —
 there is deliberately no new one). Confirm it **refuses**, names the project, and changes
-nothing. Repeat with the override and confirm it proceeds and says so in the journal. Then
+nothing. Repeat with `--force --while-playing` and confirm it proceeds and says so in the
+journal. Then
 confirm the fail-open cases: stop the daemon and re-run (proceeds with a WARNING); with the
 engine wedged so `engine_state` is `unknown` (proceeds with a WARNING); with `dry_run=true`
 (guard skipped entirely).

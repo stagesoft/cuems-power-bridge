@@ -1,0 +1,36 @@
+# T037-T039, T026b — the wrapper's degradation paths and exit discipline
+# Date:   2026-09-24T08:46:30+00:00
+# Script: ../cuems-common/usr/bin/cuems-cluster-poweroff @ 3af31cc
+#
+# Run in a harness: systemctl and ip stubbed, the helper replaced by a stub
+# that reports a chosen exit status. No cluster, no hardware.
+
+## enabled=false (T038) — short-circuits before either stage
+   "disabled (enabled=false in …) — nothing to do"      rc=0
+
+## the bridge is not installed (T037) — one ERROR, shutdown unimpeded
+   "ERROR /nonexistent/python3 missing — cuems-power-bridge not installed?
+    skipping both stages"                                rc=0
+
+## nodes_off=false (T039) — stage 1 only, no wait
+   stage 1 ran; "stage 2/2: SKIPPED — nodes_off=false"   rc=0
+
+## both stages, one lock, the helper invoked as a module
+   --stage displays --lock-held
+   --stage nodes --node-wait 120 --pre-pass --lock-held
+
+## the helper REFUSES (exit 4) during a transaction (T026b)
+   "ERROR   stage 1: REFUSED — see above"
+   "ERROR   stage 2: REFUSED — see above"   stage 1 failing did not stop stage 2
+   wrapper rc=0   <-- an ExecStop that fails would fail the stop itself
+
+## the helper reports stuck nodes (exit 5)               wrapper rc=0
+
+## the running-show guard is on the manual path ONLY
+   --force       → … --lock-held --refuse-if-running
+   transaction   → … --lock-held                    (no guard requested)
+
+# The lock warning seen throughout is the fallback working as designed:
+# /run/cuems-power-bridge does not exist in the harness, so the wrapper says
+# so and proceeds. An absent tmpfiles rule must not cost the venue its
+# orderly shutdown.
