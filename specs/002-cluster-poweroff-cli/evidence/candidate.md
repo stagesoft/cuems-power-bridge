@@ -7,11 +7,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 **Composed 2026-09-24.** Read this before starting the hardware ledger.
 
-> **⚠ Superseded 2026-09-28 — do not start the hardware ledger from the table below.**
-> Three of the four rows moved. The current state is in
-> "[Re-measured 2026-09-28](#re-measured-2026-09-28--two-tags-are-behind)" at the foot of this
-> sheet, and **two tags are behind their own branches**, one of them in a way that stops a
-> controller booting. The table below is kept as the 2026-09-24 record, not as instructions.
+> **⚠ Superseded — do not start the hardware ledger from the table below.**
+> Three of the four rows moved. The current set is at the foot of this sheet, under
+> "Re-measured 2026-09-28" and its 2026-09-29 close. The table below is kept as the
+> 2026-09-24 record, not as instructions.
 
 | Repository | Version | Tag at | Carries |
 |---|---|---|---|
@@ -98,10 +97,36 @@ already carried. **A candidate that cannot be built is not a candidate.** The ve
 move: `0.3.1-1` either way. Suite re-run at `13a9af4`: **276 passed**, the same figure the tag
 message records — those two commits touch the build, not the code.
 
+## Closed 2026-09-29 — the candidate set is coherent
+
+Both re-cuts performed, pushed and verified. **This is the table to read.**
+
+| Repository | Version | Tag at | Was | Signature |
+|---|---|---|---|---|
+| `cuems-power-bridge` | **0.3.1-1** | **`13a9af4`** | `d5c4226` | ✅ good |
+| `cuems-common` | **1.3.0-23** (UNRELEASED) | **`e3c9430`** | `3af31cc` ← `f2fc0f5` | ✅ good |
+| `cuems-nodeconf` | **0.1.0-8** (UNRELEASED) | **`b305c1c`** | `6c0cca7` | ✅ good, message amended to name `e3c9430` |
+| `cuems-utils` | 0.1.0rc16 (`4ef7f91`) | — tags later, by decision (D27) | — | — |
+
+Checked rather than assumed: every tag matches its `origin` ref; each branch head is exactly one
+documentation commit past its tag, so the convention holds; no version moved; and the composability
+failure is gone — `git show xml-refactor-merge-candidate:usr/share/cuems/cuems.service.controller`
+in `cuems-common` now yields the sentinel `00000000-0000-0000-0000-000000000000`, which
+`cuems-nodeconf`'s renderer accepts.
+
+Signatures verify for both signing methods now. This workstation signs with GPG
+`B25EB0EDCB9F13C2`; the development server signs over SSH with
+`SHA256:n2JoMP0xXSuw4NQS2cGBNEaYkcTHMobgcG1gDzRcrUU`. `gpg.ssh.allowedSignersFile` was configured
+2026-09-29, so server-made commits verify here instead of erroring — a mixed-signature history
+across these repositories is two machines, not a defect.
+
+**The lesson T050 was written for, now with a real instance.** For one day the set did not compose,
+and neither package's metadata could say so: both were at exactly their intended versions, so the
+reciprocal `Breaks:` saw nothing wrong. A candidate tag set is only as current as its least current
+member. Re-cutting one tag means re-checking its counterparts — which is what this sheet is for.
+
 ## Still open
-- **Two tag re-cuts**, above: `cuems-common` `3af31cc` → `e3c9430`, and this repository
-  `d5c4226` → `13a9af4`. Both are force-pushes of published tags — confirm before pushing, and
-  record old and new in the message, as the 2026-09-24 relocation did.
 - Two build-host tasks: the `.deb` bundling gate (T042) and the `cuems-utils` `settings.xml`
   provenance check.
-- Every hardware check. **The candidate is not validated until the ledgers are worked.**
+- **Every hardware check. The candidate is not validated until the ledgers are worked** — here, and
+  `cuems-nodeconf`'s `specs/002-public-network-map-path/checklists/hardware-verification.md` §1–§6.
