@@ -16,6 +16,7 @@ Architecture: all
 Depends: ${misc:Depends},
          ${python3:Depends},
          cuems-utils (>= 0.1.0rc16),
+         cuems-utils (<< 0.1.1~),
          cuems-common (>= 1.3.0-23),
          python3 (>= 3.11),
          python3-systemd (>= 235),
