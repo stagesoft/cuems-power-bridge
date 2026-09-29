@@ -103,12 +103,20 @@ Both re-cuts performed, pushed and verified. **This is the table to read.**
 
 | Repository | Version | Tag at | Was | Signature |
 |---|---|---|---|---|
-| `cuems-power-bridge` | **0.3.1-1** | **`13a9af4`** | `d5c4226` | ✅ good |
+| `cuems-power-bridge` | **0.3.1-1** | **`399baf7`** | `13a9af4` ← `d5c4226` | ✅ good |
 | `cuems-common` | **1.3.0-23** (UNRELEASED) | **`e3c9430`** | `3af31cc` ← `f2fc0f5` | ✅ good |
 | `cuems-nodeconf` | **0.1.0-8** (UNRELEASED) | **`b305c1c`** | `6c0cca7` | ✅ good, message amended to name `e3c9430` |
 | `cuems-utils` | 0.1.0rc16 (`4ef7f91`) | — tags later, by decision (D27) | — | — |
 
-Checked rather than assumed: every tag matches its `origin` ref; each branch head is exactly one
+**Second re-cut here, same day** (`13a9af4` → `399baf7`): `debian/control` gained
+`cuems-utils (<< 0.1.1~)` at `:19`, the upper bound this package's own `0.3.1-1` changelog entry
+already claimed it had. A floor cannot say *refuse a library that has moved past me*, and
+`cuems-utils` `0.1.1` is the release that removes the deprecated surface — so a host upgrading the
+library alone satisfied `>= 0.1.0rc16` perfectly and broke this package at runtime, during a
+poweroff, with no packaging error anywhere. Version unchanged, `0.3.1-1`; suite unchanged, 276
+passed. No counterpart tag is affected: the change is a dependency bound inside this package.
+
+Checked rather than assumed: every tag matches its `origin` ref; each head is at or one
 documentation commit past its tag, so the convention holds; no version moved; and the composability
 failure is gone — `git show xml-refactor-merge-candidate:usr/share/cuems/cuems.service.controller`
 in `cuems-common` now yields the sentinel `00000000-0000-0000-0000-000000000000`, which
