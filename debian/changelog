@@ -1,3 +1,16 @@
+cuems-power-bridge (0.3.0-8) unstable; urgency=medium
+
+  * packaging: stop shipping /usr/lib/cuems/CACHEDIR.TAG. It marks the shared
+    venv root, which is venv infrastructure like pyvenv.cfg (already stripped),
+    and cuems-engine 0.1.0rc5 ships the same path. Where the engine owns it,
+    dpkg refused the 0.3.0-5 -> 0.3.0-7 upgrade and rolled back (Castillo Medina
+    del Campo, cupula2, 2026-09-30). Every earlier release shipped the file too;
+    upgrading from them removes it only where this package owned it (a
+    cache-directory marker, nothing reads it at runtime).
+  * No code change from 0.3.0-7.
+
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 30 Sep 2026 14:07:40 +0200
+
 cuems-power-bridge (0.3.0-7) unstable; urgency=medium
 
   * displays: new POST /poweroff powers the configured projectors OFF on
