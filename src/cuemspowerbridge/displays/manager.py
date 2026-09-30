@@ -8,10 +8,11 @@ commands across it concurrently.
 Builds `DeviceDef`s from `projector.N.*` keys in `Config.extras`,
 instantiates the right `DisplayDriver` per device via the `DRIVERS`
 registry (the single extension point for new protocols), and runs
-`power_on_all` / `power_off_all` / `status_all` with `asyncio.gather`
-(mirroring `node_executor.poweroff_all`). Per-device errors are caught
-and logged, NEVER raised — one unreachable projector must not abort the
-safety-critical cluster shutdown.
+`power_on_all` / `power_off_all` / `power_off_where_needed` / `status_all`
+with `asyncio.gather` (mirroring `node_executor.poweroff_all`). Per-device
+errors are caught and logged, NEVER raised — one unreachable projector must
+not abort the safety-critical cluster shutdown. The power methods return
+per-device results so the bridge's `?wait=1` mode can report them.
 """
 
 from __future__ import annotations
@@ -200,9 +201,18 @@ class DisplayManager:
         return [{"name": drv.dev.label(), "power": self._states[i].value}
                 for i, drv in enumerate(self._drivers)]
 
-    async def _apply(self, action: str, on_ok: PowerState) -> None:
-        if not self._drivers:
-            return
+    async def _apply(
+        self, action: str, on_ok: PowerState, indices: list[int] | None = None,
+    ) -> dict[int, dict]:
+        """Send `action` to the devices at `indices` (default: all) in
+        parallel. Returns {index: per-device result}; each result is
+        ``{"name", "ok": True, "state": <on_ok>}`` on success,
+        ``{"name", "ok": False, "state": "unconfirmed", "error"}`` when the
+        device did not confirm (PJLink ERR3), or ``{"name", "ok": False,
+        "error"}`` on a hard failure. Never raises for a device error."""
+        targets = list(range(len(self._drivers))) if indices is None else list(indices)
+        if not targets:
+            return {}
 
         async def run(drv: DisplayDriver) -> None:
             if action == "on":
@@ -211,30 +221,79 @@ class DisplayManager:
                 await drv.power_off()
 
         results = await asyncio.gather(
-            *(run(d) for d in self._drivers), return_exceptions=True
+            *(run(self._drivers[i]) for i in targets), return_exceptions=True
         )
-        for i, (drv, res) in enumerate(zip(self._drivers, results)):
-            label = drv.dev.label()
+        out: dict[int, dict] = {}
+        for i, res in zip(targets, results):
+            label = self._drivers[i].dev.label()
             if isinstance(res, DisplayUnconfirmed):
                 # Command sent but state not confirmed (e.g. ERR3 warmup) —
                 # record UNKNOWN, not the optimistic target, and WARN.
                 log.warning("display %s: power %s unconfirmed: %s", label, action, res)
                 self._states[i] = PowerState.UNKNOWN
-            elif isinstance(res, Exception):
+                out[i] = {"name": label, "ok": False, "state": "unconfirmed",
+                          "error": str(res)}
+            elif isinstance(res, BaseException):
                 log.error("display %s: power %s failed: %s", label, action, res)
                 self._states[i] = PowerState.UNKNOWN
+                out[i] = {"name": label, "ok": False, "error": str(res)}
             else:
                 self._states[i] = on_ok
+                out[i] = {"name": label, "ok": True, "state": on_ok.value}
+        return out
 
-    async def power_on_all(self) -> None:
+    @staticmethod
+    def _summarise(by_index: dict[int, dict]) -> dict:
+        """Per-device results (in device order) plus counts, the shape the
+        bridge's `?wait=1` answer is built from. `succeeded` includes devices
+        skipped as already there; `unconfirmed` is the ERR3 case, neither a
+        success nor a hard failure."""
+        results = [by_index[i] for i in sorted(by_index)]
+        unconfirmed = sum(1 for r in results if r.get("state") == "unconfirmed")
+        succeeded = sum(1 for r in results if r["ok"])
+        return {
+            "results": results,
+            "succeeded": succeeded,
+            "unconfirmed": unconfirmed,
+            "failed": len(results) - succeeded - unconfirmed,
+        }
+
+    async def power_on_all(self) -> dict:
         log.info("powering ON %d display(s)%s",
                  len(self._drivers), " [dry_run]" if self.dry_run else "")
-        await self._apply("on", PowerState.ON)
+        return self._summarise(await self._apply("on", PowerState.ON))
 
-    async def power_off_all(self) -> None:
+    async def power_off_all(self) -> dict:
         log.info("powering OFF %d display(s)%s",
                  len(self._drivers), " [dry_run]" if self.dry_run else "")
-        await self._apply("off", PowerState.OFF)
+        return self._summarise(await self._apply("off", PowerState.OFF))
+
+    async def power_off_where_needed(self) -> dict:
+        """Query first, then POWR 0 only the devices that are not already OFF
+        or cooling down (the same rule as cuems-common's
+        cuems-cluster-poweroff). A second press is then a cheap no-op instead
+        of a POWR 0 into a cool-down window, which a projector answers with
+        ERR3. A device whose query fails (UNKNOWN) or that is warming up still
+        gets POWR 0. Skipped devices report ``state: "already_off"`` with the
+        queried ``power``."""
+        await self.status_all()
+        skipped: dict[int, dict] = {}
+        targets: list[int] = []
+        for i, drv in enumerate(self._drivers):
+            state = self._states[i]
+            if state in (PowerState.OFF, PowerState.COOLDOWN):
+                skipped[i] = {"name": drv.dev.label(), "ok": True,
+                              "state": "already_off", "power": state.value}
+            else:
+                targets.append(i)
+        if skipped:
+            log.info("display(s) already off/cooling, no POWR 0 sent: %s",
+                     ", ".join(f"{r['name']}={r['power']}" for r in skipped.values()))
+        if targets:
+            log.info("powering OFF %d of %d display(s)%s", len(targets),
+                     len(self._drivers), " [dry_run]" if self.dry_run else "")
+        applied = await self._apply("off", PowerState.OFF, targets)
+        return self._summarise({**skipped, **applied})
 
     async def status_all(self) -> list[dict]:
         """Query every device's power state in parallel, refresh the cache,
