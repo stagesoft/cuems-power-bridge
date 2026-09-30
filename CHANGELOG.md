@@ -41,11 +41,13 @@ been kept up with them.
 - INFO logs for a `/poweron`/`/poweroff` joining an in-flight task, for 429 on those two
   endpoints, and for each ON/OFF cancellation. `stop()` cancels the OFF task too.
 
-### Rides along from `main` since 0.3.0-5
+### Rides along from `main` since the 0.3.0-5 release commit (`6e07128`)
 
 - **Log levels survive to syslog** (`cef9d3d`) — `force=True` logging setup plus a syslog
   transport under systemd, so `--log-level` holds and warnings/errors can be filtered with
-  `journalctl -p`. Shipped in the 0.3.0-6 build but missing from its changelog entry.
+  `journalctl -p`. Missing from both the -5 and -6 changelog entries. Tag `v0.3.0-5` was
+  placed retroactively on `cef9d3d`, so a -5 rebuilt from the tag includes it, while the
+  2026-07-06 -5 build (from `6e07128`) does not.
 - **Single-controller auto-load settle** (0.3.0-6, `76adcf8`) — the node-settle margin now
   also applies when `network_map.xml` lists no slave, so a standalone controller no longer
   sends `project_ready` before its own node-engine's players have registered.
