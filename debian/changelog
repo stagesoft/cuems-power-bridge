@@ -1,3 +1,40 @@
+cuems-power-bridge (0.3.0-7) unstable; urgency=medium
+
+  * displays: new POST /poweroff powers the configured projectors OFF on
+    demand, for Companion buttons. DISPLAYS ONLY: it never powers a machine
+    off (that is /shutdown). Same checks as /poweron: 401 bad_token,
+    429 rate_limited, 503 no_displays. It queries first and sends POWR 0 only
+    to devices not already off or cooling down (the cuems-cluster-poweroff
+    rule), so a second press sends nothing instead of an ERR3 per projector.
+  * /poweron and /poweroff share one lock: each cancels and awaits the
+    other's in-flight task, then starts its own or joins its own in flight,
+    so the last request wins at task level. The startup and project-load
+    power-on paths are unchanged.
+  * ?wait=1 on /poweron and /poweroff: await the result and answer like
+    /brightness -- 200 all OK or already there, 207 partial / unconfirmed
+    (ERR3), 502 all_failed, each with per-device results; 504 timeout after
+    3 x projector_command_timeout_s + 5 s (plus one timeout for /poweroff's
+    status query), the command still running; 409 superseded when an
+    opposite request cancelled it. Without wait nothing changes: 200 at once,
+    fire-and-forget, as cuems-displays-on (cuems-common) expects.
+  * INFO logs for a /poweron or /poweroff joining an in-flight task, for 429
+    on those endpoints and for each ON/OFF cancellation; stop() cancels the
+    OFF task too. _run_shutdown is unchanged.
+  * Rides along from main since the 0.3.0-5 release commit (6e07128):
+    - log: force=True logging setup plus a syslog transport under systemd,
+      so --log-level holds and warnings/errors filter with journalctl -p
+      (cef9d3d). In neither the -5 nor the -6 entry. NB tag v0.3.0-5 was
+      placed retroactively ON cef9d3d, so a -5 rebuilt from the tag has it,
+      while the 2026-07-06 -5 build (from 6e07128) does not;
+    - auto-load: the node-settle margin on a single-controller cluster
+      (0.3.0-6, 76adcf8).
+  * tests: tests/test_bridge_poweroff.py (31 cases, incl. a fake PJLink
+    server: ERR3 -> 207 unconfirmed, unreachable -> 502);
+    tests/test_install_mjs.py updated to _patched_code()'s current
+    signature (6 tests failing on main since 8a558cb).
+
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 30 Sep 2026 13:35:00 +0200
+
 cuems-power-bridge (0.3.0-6) unstable; urgency=medium
 
   * auto-load: apply the node-settle margin on a SINGLE-CONTROLLER cluster.

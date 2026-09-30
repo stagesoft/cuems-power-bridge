@@ -2,6 +2,7 @@
 ***
 SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
 SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 ***
 -->
 
@@ -137,8 +138,10 @@ Stream Deck Nano ─USB─► Bitfocus Companion ─HTTP POST /go|/stop|/shutdow
 **What each layer does:**
 
 * **Bitfocus Companion** — Stream Deck button interface; issues HTTP POSTs to `/go`, `/stop`,
-  `/setnextcue`, `/gocue`, `/shutdown` using Companion's HTTP module. The bridge translates
-  these to WebSocket-OSC frames for the engine, or to the full shutdown sequence.
+  `/setnextcue`, `/gocue`, `/shutdown` using Companion's HTTP module, plus the displays-only
+  `/poweron` / `/poweroff` and `/brightness`. The bridge translates these to WebSocket-OSC
+  frames for the engine, to projector commands (PJLink / ESC/VP21), or to the full shutdown
+  sequence.
 * **Shelly Pro 1** — wired flip-switch triggered by a physical power switch (SW0). On
   transition to OFF the bundled mJS script fires an HTTP POST to `/shutdown`. The Shelly also
   acts as the mains relay: `Switch.Set toggle_after` arms a hardware timer that cuts power
@@ -182,6 +185,11 @@ The central coordinator. Owns the HTTP server, the state machine, and all sub-cl
 * **`Bridge.handle_gocue(request)`** — `POST /gocue`; same gates as `/setnextcue` plus the
   `armed` check, then sends `/engine/command/setnextcue <uuid>` followed by
   `/engine/command/go`.
+* **`Bridge.handle_poweron(request)`** / **`Bridge.handle_poweroff(request)`** — `POST /poweron`
+  / `POST /poweroff`; displays only. Under a shared `asyncio.Lock` each cancels the other's
+  in-flight task, then spawns its own (or joins one already in flight), so the last request
+  wins. `/poweroff` queries first and skips devices already off or cooling down. `?wait=1`
+  awaits the result and returns per-device `results`.
 * **`Bridge.handle_shutdown(request)`** — `POST /shutdown`; acquires `asyncio.Lock`, runs
   the refuse-if-running guard, then delegates to `_run_shutdown()`.
 * **`Bridge._run_shutdown()`** — implements the 8-step shutdown sequence:
@@ -730,6 +738,56 @@ HTTP/1.1 200 OK
 
 ---
 
+#### `POST /poweron[?wait=1]` and `POST /poweroff[?wait=1]`
+
+Switch the configured projectors (`projector.N.*`, PJLink) on or off. **Displays only:**
+`/poweroff` never powers a machine off — that is `/shutdown`.
+
+* **Last request wins.** Both endpoints share one lock: each cancels the other's in-flight
+  task, then starts its own, or joins its own if one is already running. This holds at task
+  level; a projector itself answers PJLink ERR3 for 30–60 s while it warms up or cools down.
+* **`/poweroff` queries first** (`POWR ?`) and sends `POWR 0` only to devices not already
+  off or cooling down, so a second press sends nothing. Warming or unanswered devices still
+  get `POWR 0`.
+* **Without `wait`** (the default, and what cuems-common's `cuems-displays-on` uses): 200
+  `{"ok": true}` at once, fire-and-forget.
+* **With `?wait=1`:** the bridge awaits the task and answers like `/brightness`, with
+  per-device `results`. The wait is bounded by `3 × projector_command_timeout_s + 5` s for
+  `/poweron` and `4 × projector_command_timeout_s + 5` s for `/poweroff` (one more timeout for
+  its status query): 20 s and 25 s at the default 5 s. Set the HTTP client's own timeout
+  above that.
+
+```
+POST /poweroff?wait=1 HTTP/1.1
+X-Auth-Token: <token>
+
+HTTP/1.1 207 Multi-Status
+{"ok": false, "action": "off", "reason": "partial",
+ "succeeded": 1, "unconfirmed": 0, "failed": 1,
+ "results": [
+   {"name": "cupula-left",  "ok": true,  "state": "already_off", "power": "cooldown"},
+   {"name": "cupula-right", "ok": false, "error": "cupula-right: timeout after 5.0s"}]}
+```
+
+Per-device `state`: `on` / `off` (confirmed), `already_off` (skipped; `power` is the queried
+`off` or `cooldown`), `unconfirmed` (sent, but the projector kept answering ERR3; `ok` false).
+A hard failure carries `error` only.
+
+| Status | Reason token | Condition |
+|---|---|---|
+| 200 | — | Accepted (no `wait`); or every device OK / already there |
+| 207 | `partial` | Some devices OK or unconfirmed, some failed |
+| 207 | `unconfirmed` | No hard failure, but at least one device answered ERR3 to the end |
+| 401 | `bad_token` | Token mismatch |
+| 409 | `superseded` | (`wait`) An opposite request cancelled this one's task |
+| 429 | `rate_limited` | Called within 200 ms of the previous call to the same endpoint |
+| 500 | `internal_error` | (`wait`) The power task raised unexpectedly |
+| 502 | `all_failed` | (`wait`) Every device failed outright (e.g. all unreachable) |
+| 503 | `no_displays` | No `projector.N.*` configured |
+| 504 | `timeout` | (`wait`) No result within the bound; the command keeps running |
+
+---
+
 #### `POST /shutdown[?force=1]`
 
 Run the full orderly cluster shutdown sequence. Concurrent calls return 409 immediately
@@ -1134,7 +1192,7 @@ triggers the script, it does not drive the relay) so a flip never cuts mains dir
 
 ### Configure Bitfocus Companion
 
-Add three buttons using Companion's **HTTP** module:
+Add buttons using Companion's **HTTP** module:
 
 | Button | Method | URL | Headers |
 |---|---|---|---|
@@ -1143,6 +1201,12 @@ Add three buttons using Companion's **HTTP** module:
 | SET NEXT CUE | POST | `http://controller.local:8478/setnextcue` | `X-Auth-Token: <token>`; body `{"cue":"<uuid>"}` |
 | GO CUE | POST | `http://controller.local:8478/gocue` | `X-Auth-Token: <token>`; body `{"cue":"<uuid>"}` |
 | SHUTDOWN | POST | `http://controller.local:8478/shutdown` | `X-Auth-Token: <token>` |
+| PROY ON | POST | `http://localhost:8478/poweron?wait=1` | `X-Auth-Token: <token>` |
+| PROY OFF | POST | `http://localhost:8478/poweroff?wait=1` | `X-Auth-Token: <token>` |
+
+PROY ON / PROY OFF switch only this controller's projectors (displays, not machines). With
+`?wait=1` the button can show the per-device result; Companion's HTTP timeout must exceed the
+wait bound (see `POST /poweron` / `POST /poweroff`), otherwise drop `?wait=1`.
 
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).

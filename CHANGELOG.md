@@ -2,6 +2,7 @@
 ***
 SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
 SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 ***
 -->
 
@@ -12,6 +13,49 @@ All notable changes to `cuems-wsclient` are documented here.
 The Debian package uses a separate revision suffix (`-1`, `-2`, …) in `debian/changelog`
 for packaging-only changes. The Python package version (`pyproject.toml`,
 `cuemswsclient.__version__`) is authoritative for the software version.
+
+---
+
+## 0.3.0-7 (Debian revision) — 2026-09-30
+
+Per-revision detail for 0.3.0-1 … 0.3.0-6 lives in `debian/changelog`; this file had not
+been kept up with them.
+
+### Added
+
+- **`POST /poweroff`** — switches the configured projectors OFF on demand, for Companion
+  buttons. **Displays only**: it never powers a machine off (that is `/shutdown`). Same
+  checks as `/poweron`: 401 `bad_token`, 429 `rate_limited`, 503 `no_displays`. It queries
+  first and sends `POWR 0` only to devices not already off or cooling down, so a second
+  press sends nothing (the rule `cuems-cluster-poweroff` in cuems-common already follows).
+- **Last request wins between `/poweron` and `/poweroff`** — they share one lock; each
+  cancels the other's in-flight task before starting its own, or joins its own if one is
+  already running. At task level only: a projector still answers ERR3 while it warms or
+  cools.
+- **`?wait=1` on `/poweron` and `/poweroff`** — awaits the result and answers like
+  `/brightness`: 200 all OK or already there, 207 `partial` / `unconfirmed` (ERR3), 502
+  `all_failed`, each with per-device `results`; 504 `timeout` when the bound
+  (`3 × projector_command_timeout_s + 5` s, plus one timeout for `/poweroff`'s query)
+  expires; 409 `superseded` when an opposite request cancelled the task. **Without `wait`
+  nothing changes**: 200 at once, fire-and-forget, as `cuems-displays-on` expects.
+- INFO logs for a `/poweron`/`/poweroff` joining an in-flight task, for 429 on those two
+  endpoints, and for each ON/OFF cancellation. `stop()` cancels the OFF task too.
+
+### Rides along from `main` since the 0.3.0-5 release commit (`6e07128`)
+
+- **Log levels survive to syslog** (`cef9d3d`) — `force=True` logging setup plus a syslog
+  transport under systemd, so `--log-level` holds and warnings/errors can be filtered with
+  `journalctl -p`. Missing from both the -5 and -6 changelog entries. Tag `v0.3.0-5` was
+  placed retroactively on `cef9d3d`, so a -5 rebuilt from the tag includes it, while the
+  2026-07-06 -5 build (from `6e07128`) does not.
+- **Single-controller auto-load settle** (0.3.0-6, `76adcf8`) — the node-settle margin now
+  also applies when `network_map.xml` lists no slave, so a standalone controller no longer
+  sends `project_ready` before its own node-engine's players have registered.
+
+### Fixed
+
+- `tests/test_install_mjs.py` passes `toggle_id`/`force` to `_patched_code()`; its six tests
+  had failed with TypeError since those arguments became required.
 
 ---
 

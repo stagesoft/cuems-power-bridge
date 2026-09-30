@@ -95,6 +95,14 @@ class Bridge:
         # reports a project loaded; we keep the task handle to cancel it on
         # stop() and to suppress duplicate spawns on engine reconnects.
         self._projector_on_task: asyncio.Task | None = None
+        # Displays-only power-off from POST /poweroff (never from shutdown,
+        # which runs its own power-off). Handle kept to dedup, to let a later
+        # /poweron cancel it, and to cancel on stop().
+        self._projector_off_task: asyncio.Task | None = None
+        # Serialises /poweron and /poweroff's cancel-the-other-then-spawn, so
+        # an interleaved ON/OFF pair can't leave both tasks running: the last
+        # request to reach the bridge wins at task level.
+        self._projector_power_lock = asyncio.Lock()
         # Auto-play GO task, spawned after a successful auto-load (fire-and-
         # forget); handle kept to dedup and to cancel on stop()/shutdown.
         self._auto_play_task: asyncio.Task | None = None
@@ -287,20 +295,127 @@ class Bridge:
         return self._ok({"cue": cue})
 
     async def handle_poweron(self, request: web.Request) -> web.Response:
-        """Power displays ON on demand — symmetric with /shutdown's
-        projectors-off. Fire-and-forget: schedules the shared power-on task
-        and returns immediately (200 = accepted), so a slow/unreachable
-        projector can't hold the HTTP response open (Shelly/Companion expect a
-        quick reply). The `_projector_on_task` guard in _spawn_projector_power_on
-        dedups concurrent calls, so no separate lock is needed."""
+        """Power displays ON on demand.
+
+        Default (no `wait`): fire-and-forget — schedules the shared power-on
+        task and returns 200 at once (= accepted), so a slow/unreachable
+        projector can't hold the HTTP response open. cuems-common's
+        cuems-displays-on relies on exactly this.
+
+        Under `_projector_power_lock` it first cancels an in-flight /poweroff
+        task, so the last of an ON/OFF pair wins. A power-on already in flight
+        (startup, project load, an earlier /poweron) is joined, not doubled.
+
+        `?wait=1`: await the task and answer with per-device results
+        (see _power_wait_response)."""
         if not self._check_token(request):
             return self._err("bad_token", 401)
         if not self._rate.allow("poweron"):
+            log.info("/poweron: rate limited (429)")
             return self._err("rate_limited", 429)
         if not self.displays.configured:
             return self._err("no_displays", 503)
-        self._spawn_projector_power_on("/poweron request")
-        return self._ok()
+        async with self._projector_power_lock:
+            await self._cancel_projector_off_task("superseded by /poweron")
+            if self._projector_on_task is not None and not self._projector_on_task.done():
+                log.info("/poweron: displays power-on already in flight; joining it")
+            task = self._spawn_projector_power_on("/poweron request")
+        if not self._wait_requested(request):
+            return self._ok()
+        return await self._power_wait_response(
+            "on", task, self._power_wait_budget_s(query_first=False))
+
+    async def handle_poweroff(self, request: web.Request) -> web.Response:
+        """Power displays OFF on demand — DISPLAYS ONLY, never the machines
+        (that is /shutdown). Same checks, lock and `wait` semantics as
+        /poweron, mirrored: under the lock it cancels an in-flight power-on,
+        then spawns the power-off unless one is already in flight (joined).
+
+        The power-off queries first and sends POWR 0 only to devices not
+        already off or cooling down (DisplayManager.power_off_where_needed),
+        so a second press is a no-op instead of an ERR3 WARN per projector."""
+        if not self._check_token(request):
+            return self._err("bad_token", 401)
+        if not self._rate.allow("poweroff"):
+            log.info("/poweroff: rate limited (429)")
+            return self._err("rate_limited", 429)
+        if not self.displays.configured:
+            return self._err("no_displays", 503)
+        async with self._projector_power_lock:
+            await self._cancel_projector_on_task("superseded by /poweroff")
+            task = self._projector_off_task
+            if task is not None and not task.done():
+                log.info("/poweroff: displays power-off already in flight; joining it")
+            else:
+                log.info("/poweroff request → powering off displays")
+                task = asyncio.create_task(
+                    self.displays.power_off_where_needed(), name="projector-power-off"
+                )
+                self._projector_off_task = task
+        if not self._wait_requested(request):
+            return self._ok()
+        return await self._power_wait_response(
+            "off", task, self._power_wait_budget_s(query_first=True))
+
+    @staticmethod
+    def _wait_requested(request: web.Request) -> bool:
+        return request.query.get("wait") == "1"
+
+    def _power_wait_budget_s(self, *, query_first: bool) -> float:
+        """Bound for `?wait=1`: the driver's full POWR budget (3 attempts of
+        projector_command_timeout_s plus 1+3 s of backoff) + 1 s margin — the
+        budget shutdown uses for its own power-off. /poweroff adds one more
+        timeout for its status query, which runs before the POWR 0 and costs
+        a full timeout on an unreachable projector; without it an unreachable
+        projector would answer 504 instead of the 502 it deserves."""
+        t = self.cfg.projector_command_timeout_s
+        return (4 if query_first else 3) * t + 5
+
+    async def _power_wait_response(
+        self, action: str, task: asyncio.Task, budget_s: float,
+    ) -> web.Response:
+        """Await a power task (bounded) and answer like /brightness:
+        200 every device OK or already there, 207 partial or unconfirmed
+        (PJLink ERR3 while warming/cooling: sent but not confirmed), 502 every
+        device failed outright, each with per-device `results`; 504 if the
+        bound expires (the task keeps running); 409 `superseded` if an
+        opposite request cancelled the task meanwhile."""
+        # asyncio.wait never cancels the task: neither on timeout nor if this
+        # handler is itself cancelled (client gone). The command still lands.
+        done, _ = await asyncio.wait({task}, timeout=budget_s)
+        if not done:
+            log.warning("/power%s?wait=1: no result within %.0fs (504); the "
+                        "command keeps running", action, budget_s)
+            return web.json_response(
+                {"ok": False, "reason": "timeout", "action": action,
+                 "timeout_s": budget_s}, status=504)
+        if task.cancelled():
+            log.info("/power%s?wait=1: superseded by a later request (409)", action)
+            return web.json_response(
+                {"ok": False, "reason": "superseded", "action": action}, status=409)
+        exc = task.exception()
+        if exc is not None:
+            log.error("/power%s?wait=1: power task raised: %s", action, exc)
+            return self._err("internal_error", 500)
+        summary = task.result() or {}
+        results = summary.get("results", [])
+        succeeded = summary.get("succeeded", 0)
+        unconfirmed = summary.get("unconfirmed", 0)
+        failed = summary.get("failed", 0)
+        body: dict = {"ok": failed == 0 and unconfirmed == 0, "action": action,
+                      "succeeded": succeeded, "unconfirmed": unconfirmed,
+                      "failed": failed, "results": results}
+        if failed == 0 and unconfirmed == 0:
+            log.info("/power%s?wait=1: %d device(s) OK", action, succeeded)
+            return web.json_response(body, status=200)
+        if succeeded == 0 and unconfirmed == 0:
+            body["reason"] = "all_failed"
+            log.error("/power%s?wait=1: failed on all %d device(s)", action, failed)
+            return web.json_response(body, status=502)
+        body["reason"] = "partial" if failed else "unconfirmed"
+        log.warning("/power%s?wait=1: %s — %d ok, %d unconfirmed, %d failed",
+                    action, body["reason"], succeeded, unconfirmed, failed)
+        return web.json_response(body, status=207)
 
     async def handle_brightness(self, request: web.Request) -> web.Response:
         """Set a fixed brightness preset across the brightness fleet (Epson
@@ -802,14 +917,19 @@ class Bridge:
             # Back to no project — re-arm so the next load powers on again.
             self._project_loaded_seen = False
 
-    def _spawn_projector_power_on(self, reason: str = "project loaded") -> None:
+    def _spawn_projector_power_on(self, reason: str = "project loaded") -> asyncio.Task:
+        """Spawn the shared power-on task, or return the one already in
+        flight (dedup; DEBUG here because the on-load path can re-fire —
+        /poweron logs its own join at INFO). Returns the task either way so
+        /poweron?wait=1 can await it."""
         if self._projector_on_task is not None and not self._projector_on_task.done():
             log.debug("projector power-on already in progress; skipping duplicate")
-            return
+            return self._projector_on_task
         log.info("%s → powering on displays", reason)
         self._projector_on_task = asyncio.create_task(
             self.displays.power_on_all(), name="projector-power-on"
         )
+        return self._projector_on_task
 
     def _maybe_power_on_at_start(self) -> None:
         """Power displays ON at bridge startup, independent of project load.
@@ -825,18 +945,19 @@ class Bridge:
         if self.cfg.projector_power_on_on_start and self.displays.configured:
             self._spawn_projector_power_on("startup")
 
-    async def _cancel_projector_on_task(self) -> None:
+    async def _cancel_projector_on_task(self, why: str = "stop/shutdown") -> None:
         """Cancel any in-flight power-on task and wait for it to unwind.
 
-        Used on stop() and at the start of shutdown so a power-on in
-        progress can't race the power-off (POWR 1 vs POWR 0 to the same
-        device). Suppresses the cancelled task's CancelledError; logs any
-        real error.
+        Used on stop(), at the start of shutdown and by /poweroff so a
+        power-on in progress can't race the power-off (POWR 1 vs POWR 0 to
+        the same device). Suppresses the cancelled task's CancelledError;
+        logs any real error.
         """
         t = self._projector_on_task
         self._projector_on_task = None
         if t is None or t.done():
             return
+        log.info("cancelling in-flight displays power-on (%s)", why)
         t.cancel()
         try:
             await t
@@ -844,6 +965,23 @@ class Bridge:
             pass
         except Exception:
             log.exception("projector power-on task errored during cancel")
+
+    async def _cancel_projector_off_task(self, why: str = "stop") -> None:
+        """Mirror of _cancel_projector_on_task for the /poweroff task: used
+        by /poweron (so a POWR 0 in progress can't race its POWR 1) and on
+        stop()."""
+        t = self._projector_off_task
+        self._projector_off_task = None
+        if t is None or t.done():
+            return
+        log.info("cancelling in-flight displays power-off (%s)", why)
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("projector power-off task errored during cancel")
 
     # ------------------- auto-play -------------------
 
@@ -940,6 +1078,7 @@ class Bridge:
         app.router.add_post("/setnextcue", self.handle_setnextcue)
         app.router.add_post("/gocue", self.handle_gocue)
         app.router.add_post("/poweron", self.handle_poweron)
+        app.router.add_post("/poweroff", self.handle_poweroff)
         app.router.add_post("/shutdown", self.handle_shutdown)
         app.router.add_post("/brightness", self.handle_brightness)
         runner = web.AppRunner(app)
@@ -963,5 +1102,6 @@ class Bridge:
             self._auto_load_task = None
         await self._cancel_auto_play_task()
         await self._cancel_projector_on_task()
+        await self._cancel_projector_off_task()
         await self.engine.stop()
         await self.editor.stop()
