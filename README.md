@@ -106,7 +106,8 @@ Stream Deck Nano ─USB─► Bitfocus Companion ─HTTP POST /go|/stop|/shutdow
                          │  Config ──► Bridge (asyncio) ──┬─► EngineClient               │
                          │                                │   ws://localhost:9190          │
                          │                                │   binary OSC status cache     │
-                         │                                │   (running/armed/load/nextcue)│
+                         │                                │   (running/armed/load/nextcue
+                         │                                │    + cue_name/<uuid> → names)│
                          │                                │                               │
                          │                                ├─► EditorClient               │
                          │                                │   ws://localhost:9092          │

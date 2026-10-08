@@ -46,6 +46,13 @@ class EngineClient:
         self.armed: str = UNKNOWN    # "yes" | "no" | UNKNOWN
         self.load: str = UNKNOWN     # "" (empty == no project) | <unix_name> | UNKNOWN
         self.nextcue: str = UNKNOWN
+        # Cue names of the loaded script, {uuid: name}, from
+        # /engine/status/cue_name/<uuid> (cuems-engine >= 869fedahu). The engine
+        # sends them AFTER /engine/status/load, so a change of `load` empties
+        # the table and the burst that follows refills it; emptied on
+        # disconnect too (the late-join dump re-sends them). Empty against an
+        # older engine.
+        self.cue_names: dict[str, str] = {}
         self.connected: bool = False
         # Listeners called on every status update: cb(key, value).
         self._listeners: list[Callable[[str, Any], None]] = []
@@ -155,6 +162,7 @@ class EngineClient:
                 self.armed = UNKNOWN
                 self.load = UNKNOWN
                 self.nextcue = UNKNOWN
+                self.cue_names = {}
                 # Fire disconnect listeners only on a real drop (we were
                 # connected), not on failed connect attempts.
                 if was_connected:
@@ -186,9 +194,19 @@ class EngineClient:
                 key = address[len("/engine/status/"):]
                 # Top-level fields are flat strings; nested paths (cue/...,
                 # cue_enabled/..., audio/...) we don't track in the cache.
+                if key == "load":
+                    new_load = str(value) if value is not None else ""
+                    if new_load != self.load:
+                        # New load (or none): new name table. The engine's
+                        # cue_name burst follows this message.
+                        self.cue_names = {}
                 if key in ("running", "armed", "load", "nextcue"):
                     setattr(self, key, str(value) if value is not None else "")
                     log.debug("engine status %s=%r", key, value)
+                elif key.startswith("cue_name/"):
+                    self.cue_names[key[len("cue_name/"):]] = (
+                        str(value) if value is not None else ""
+                    )
                 for cb in self._listeners:
                     try:
                         cb(key, value)

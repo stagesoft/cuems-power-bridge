@@ -33,6 +33,7 @@ class _FakeEngine:
         self.armed = armed
         self.load = load
         self.nextcue = nextcue
+        self.cue_names: dict[str, str] = {}
         self._send_results = list(send_results) if send_results else []
         self.sent: list[tuple[str, Any]] = []
 

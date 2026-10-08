@@ -162,6 +162,9 @@ class Bridge:
             # /engine/status/nextcue; cached in engine_state). Lets a Companion
             # button confirm a /setnextcue selection took effect.
             "nextcue": self.engine.nextcue,
+            # Its name, from the engine's cue_name broadcast (cuems-engine >=
+            # 869fedahu); "" against an older engine or between loads.
+            "nextcue_name": self.engine.cue_names.get(self.engine.nextcue, ""),
             "shelly_timer_armed_s": self.cfg.shelly_safety_timer_s,
             "last_error": self._last_error,
             "displays": self.displays.snapshot(),
