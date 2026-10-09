@@ -717,6 +717,12 @@ class NdiPreview:
             "last": None,
         }
         req = self._last
+        if req is not None and req.target.address not in self._versions:
+            # The startup line is usually older than the request's cursor.
+            version = await self.journal.version(req.target)
+            if version:
+                self._versions[req.target.address] = version
+                body["vc_versions"] = dict(self._versions)
         if req is not None:
             if req.verdict.state in ("frames", "no_frames_yet") and not req.stopped:
                 try:

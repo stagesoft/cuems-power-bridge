@@ -275,7 +275,7 @@ class _FakeJournal:
         return list(self.script) if self.loaded else []
 
     async def version(self, target):
-        return None
+        return "0.1.2-8"
 
 
 @pytest.fixture(autouse=True)
@@ -320,6 +320,7 @@ async def test_show_without_wait_returns_pending_and_status_follows(tmp_path):
     await asyncio.sleep(0.2)
     st = await pv.status()
     assert st["last"]["confirm"] == "no_frames_yet"
+    assert st["vc_versions"] == {"127.0.0.1": "0.1.2-8"}
     pv.journal.script += ["NDI: Source format updated 1280x720 @ 50 fps (was invented)"]
     assert (await pv.status())["last"]["confirm"] == "frames"
     pv.journal.script += ["Reset: removing all layers, cancelling loads, resetting master"]
