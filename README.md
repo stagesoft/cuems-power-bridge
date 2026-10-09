@@ -140,7 +140,8 @@ Stream Deck Nano ─USB─► Bitfocus Companion ─HTTP POST /go|/stop|/shutdow
 
 * **Bitfocus Companion** — Stream Deck button interface; issues HTTP POSTs to `/go`, `/stop`,
   `/setnextcue`, `/gocue`, `/shutdown` using Companion's HTTP module, plus the displays-only
-  `/poweron` / `/poweroff` and `/brightness`. The bridge translates these to WebSocket-OSC
+  `/poweron` / `/poweroff` and `/brightness`, and the montaje NDI preview (`/ndi/preview`,
+  `/ndi/stop`). The bridge translates these to WebSocket-OSC
   frames for the engine, to projector commands (PJLink / ESC/VP21), or to the full shutdown
   sequence.
 * **Shelly Pro 1** — wired flip-switch triggered by a physical power switch (SW0). On
@@ -191,6 +192,12 @@ The central coordinator. Owns the HTTP server, the state machine, and all sub-cl
   in-flight task, then spawns its own (or joins one already in flight), so the last request
   wins. `/poweroff` queries first and skips devices already off or cooling down. `?wait=1`
   awaits the result and returns per-device `results`.
+* **`NdiPreview`** (`ndi_preview.py`, routes `/ndi/sources`, `/ndi/outputs`, `/ndi/preview`,
+  `/ndi/stop`, `/ndi/status`; CLI `cuems-ndi-preview`) — NDI preview for montajes: shows an
+  NDI source on any node's output while no project is loaded, by driving that node's
+  videocomposer over OSC (`ndi://` load, `fit_output`, `ndi/discover`; videocomposer
+  ≥ 0.1.2-7) and reading its answers back from the journal. Refused while a project is
+  loaded or running and while the bridge's own auto-load is pending. See CLAUDE.md.
 * **`Bridge.handle_shutdown(request)`** — `POST /shutdown`; acquires `asyncio.Lock`, runs
   the refuse-if-running guard, then delegates to `_run_shutdown()`.
 * **`Bridge._run_shutdown()`** — implements the 8-step shutdown sequence:
@@ -584,8 +591,9 @@ either read-only (config, resolved node list) or protected by `asyncio.Lock`
 
 Base URL: `http://<controller>:8478` (default bind `0.0.0.0:8478`).
 
-All endpoints except `GET /status` validate the `X-Auth-Token` header when
-`shared_token` is configured. All responses are JSON `{"ok": bool, "reason": "<token>"}`.
+All endpoints except `GET /status` and the NDI preview's `/ndi/*` validate the `X-Auth-Token`
+header when `shared_token` is configured (`/ndi/*` is open on the internal network like the
+CUEMS UI; a valid token only adds the relay details to `GET /ndi/status`). All responses are JSON `{"ok": bool, "reason": "<token>"}`.
 
 ---
 
@@ -1204,10 +1212,39 @@ Add buttons using Companion's **HTTP** module:
 | SHUTDOWN | POST | `http://controller.local:8478/shutdown` | `X-Auth-Token: <token>` |
 | PROY ON | POST | `http://localhost:8478/poweron?wait=1` | `X-Auth-Token: <token>` |
 | PROY OFF | POST | `http://localhost:8478/poweroff?wait=1` | `X-Auth-Token: <token>` |
+| NDI → *screen* | POST | `http://localhost:8478/ndi/preview` | none; body `{"source":"#1","output":"<screen>"}` |
+| QUITAR *screen* | POST | `http://localhost:8478/ndi/stop` | none; body `{"output":"<screen>"}` |
+| QUITAR TODO | POST | `http://localhost:8478/ndi/stop` | none; body `{}` |
 
 PROY ON / PROY OFF switch only this controller's projectors (displays, not machines). With
 `?wait=1` the button can show the per-device result; Companion's HTTP timeout must exceed the
 wait bound (see `POST /poweron` / `POST /poweroff`), otherwise drop `?wait=1`.
+
+**NDI preview buttons (montajes).** One NDI button and one QUITAR button per screen,
+set up once per cluster, since the screens do not change between montajes. `<screen>` is the
+screen's UI name ("Monitor derecha") or `<role_id>_<connector>` (`node01_HDMI-A-1`); run
+`cuems-ndi-preview outputs` on the controller to list them. Which machine drives the screen,
+and whether the source goes direct or through the controller's relay, is the bridge's
+business. Sources change from montaje to montaje, so the buttons name **`#1`**: the first
+source of the cluster-wide list, which is sorted alphabetically. With one NDI sender on the
+network (the usual montaje) that is always the right one, and nothing needs redoing. With
+several, `#1` is whichever sorts first. A button can instead carry part of the sender's name
+(`"source":"PORTATIL"`): any unique substring matches, and two matches give
+`409 ambiguous_source`. Leave out `"wait"`. The bridge answers at once (`202`; refusals such
+as `409 project_loaded` or `404 source_not_found` are immediate too), whereas `wait:true`
+holds the reply up to 15 s, which can outlast Companion's HTTP timeout. A second NDI button on the
+same screen replaces what it shows. `GET /ndi/status` (no token) tells what each screen
+shows. Bodies must be JSON with `Content-Type: application/json` (Companion's JSON body type);
+any other type is refused with `415 bad_content_type`.
+
+**Without Companion: the NDI page.** Open `http://<controller>:8478/ndi/` on a phone, tablet or
+laptop on the controller's network or WiFi. It lists the cluster's sources and screens by
+itself (no per-site setup): pick a source, press **Mostrar** on a screen, **Quitar** to take it
+off. The top line says whether previews are possible (a loaded or running project, an
+unknown engine or a pending auto-load block them); refusals are shown in plain Spanish. It asks
+for no password: like the CUEMS UI on `:80`, the NDI preview is open on the internal network
+until CUEMS has users. Only `/ndi/*` is open; `shared_token` keeps guarding every other
+endpoint, and it is never handed to the page.
 
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).

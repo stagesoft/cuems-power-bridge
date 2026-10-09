@@ -49,6 +49,7 @@ cuems-power-bridge = "cuemspowerbridge.scripts.power_bridge:main"
 cuems-power-bridge-deploy-keys = "cuemspowerbridge.scripts.deploy_keys:main"
 cuems-power-bridge-install-mjs = "cuemspowerbridge.scripts.install_shelly_mjs:main"
 cuems-power-bridge-test-projector = "cuemspowerbridge.scripts.test_projector:main"
+cuems-ndi-preview = "cuemspowerbridge.scripts.ndi_preview:main"
 cuems-wsclient = "cuemspowerbridge.wsclient:main_cli"
 
 [tool.pytest.ini_options]

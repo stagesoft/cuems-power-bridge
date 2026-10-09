@@ -3,13 +3,15 @@ set -e
 
 # SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
 # SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 
 # cuems-power-bridge post-installation script
 #
 # 1. Drop a starter /etc/cuems/power-bridge.conf if none exists (operator
 #    customises Shelly URL, shared_token, auto_load_project, etc).
 # 2. Generate the SSH keypair used to ssh+poweroff cluster nodes.
-# 3. Reload systemd to pick up the unit shipped in cuems-common.
+# 3. Check the journal groups the unit joins (SupplementaryGroups).
+# 4. Reload systemd to pick up the unit (shipped by this package).
 
 CONF=/etc/cuems/power-bridge.conf
 DEFAULT_CONF=/usr/share/cuems/power-bridge.conf.default
@@ -43,7 +45,17 @@ case "$1" in
             echo "cuems-power-bridge: run 'cuems-power-bridge-deploy-keys <node>...' to authorise nodes."
         fi
 
-        # Reload systemd if available (unit is shipped by cuems-common).
+        # The unit joins these groups to read the videocomposers' journals
+        # (NDI preview). Without one, systemd refuses to start it (216/GROUP).
+        for grp in systemd-journal systemd-journal-remote; do
+            if ! getent group "$grp" >/dev/null 2>&1; then
+                echo "cuems-power-bridge: WARNING: group '$grp' does not exist;" >&2
+                echo "cuems-power-bridge: the service will fail to start (216/GROUP)." >&2
+                echo "cuems-power-bridge: install systemd-journal-remote (cuems-common depends on it)." >&2
+            fi
+        done
+
+        # Reload systemd if available (the unit is shipped by this package).
         if command -v deb-systemd-helper >/dev/null 2>&1; then
             deb-systemd-helper update-state >/dev/null 2>&1 || true
         elif command -v systemctl >/dev/null 2>&1; then

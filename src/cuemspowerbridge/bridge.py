@@ -25,6 +25,7 @@ from .config import Config
 from .displays.manager import DisplayManager
 from .editor_client import EditorClient
 from .engine_state import UNKNOWN, EngineClient
+from .ndi_preview import NdiPreview
 from .node_executor import SshTarget, poweroff_all
 from .reachability import wait_until_all_down
 from .shelly import ShellyClient, ShellyError
@@ -127,6 +128,8 @@ class Bridge:
         self._nodes_pending: list[str] = []
         self._last_error: str | None = None
         self._rate = _RateLimiter()
+        # NDI preview during montajes (/ndi/*, cuems-ndi-preview).
+        self.ndi = NdiPreview(self)
 
     # ------------------- state machine -------------------
 
@@ -676,6 +679,27 @@ class Bridge:
                     )
                     delay = 30.0
 
+    def auto_load_active(self) -> bool:
+        """True while the auto-load loop would (re)load a project at its next
+        tick once the engine is idle: a project is configured, the loop is not
+        disabled, and either it is persistent or its once-only load has not
+        completed IN THIS PROCESS (any bridge restart re-arms it). The NDI
+        preview refuses then — the load's /videocomposer/reset would wipe it."""
+        return bool(
+            self.cfg.auto_load_project
+            and not self._auto_load_disabled
+            and (self.cfg.auto_load_persistent or not self._auto_load_done)
+        )
+
+    def auto_load_state(self) -> dict:
+        return {
+            "project": self.cfg.auto_load_project or None,
+            "persistent": self.cfg.auto_load_persistent,
+            "done": self._auto_load_done,
+            "disabled": self._auto_load_disabled,
+            "active": self.auto_load_active(),
+        }
+
     def _operator_clobber(self) -> bool:
         """True iff a DIFFERENT project than the one we drove is loaded.
 
@@ -1084,6 +1108,7 @@ class Bridge:
         app.router.add_post("/poweroff", self.handle_poweroff)
         app.router.add_post("/shutdown", self.handle_shutdown)
         app.router.add_post("/brightness", self.handle_brightness)
+        self.ndi.register(app)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, self.cfg.listen_host, self.cfg.listen_port)
@@ -1106,5 +1131,6 @@ class Bridge:
         await self._cancel_auto_play_task()
         await self._cancel_projector_on_task()
         await self._cancel_projector_off_task()
+        await self.ndi.close()
         await self.engine.stop()
         await self.editor.stop()

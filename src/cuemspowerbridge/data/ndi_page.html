@@ -1,0 +1,465 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- SPDX-FileContributor: Ion Reguera <ion@stagelab.coop> -->
+<!--
+  NDI preview page for montajes (plan 869ekxuez rev 11, cuems-RELATIONS
+  Plans/2026-10-08-ndi-preview-montajes.md). Served by the power-bridge at
+  /ndi/. A thin client of /ndi/sources, /ndi/outputs, /ndi/status,
+  /ndi/preview and /ndi/stop, like cuems-ndi-preview and the Companion
+  buttons: all the logic stays in the bridge.
+
+  Rules this file keeps (tests/test_ndi_page.py checks them):
+  - self-contained: no external URL (a controller may have no internet);
+  - one inline style block and one inline script block, hashed into the CSP at
+    startup (keep tag names out of this comment);
+  - NDI source names come from the network: text only, never parsed as HTML;
+  - every reason token and preview state the bridge can return has Spanish
+    text in REASONS / STATES;
+  - relative URLs only, so a proxy prefix (D28) works unchanged.
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Previsualización NDI</title>
+<style>
+:root {
+  --bg: #f6f6f4; --card: #ffffff; --fg: #1d1d1b; --muted: #66665f; --line: #d9d9d3;
+  --accent: #1f5fbf; --accent-fg: #ffffff; --ok: #1e7b34; --warn: #a15c00; --bad: #b3261e;
+  --absent: #ececea;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413; --card: #1f1f1d; --fg: #ececea; --muted: #a3a39c; --line: #3a3a36;
+    --accent: #6b9ff0; --accent-fg: #0d0d0c; --ok: #6cc684; --warn: #e5a54b; --bad: #f08a80;
+    --absent: #262624;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.4rem; margin: 0 0 8px; }
+h2 { font-size: 1.1rem; margin: 24px 0 8px; }
+h3 { font-size: 1.15rem; margin: 0; }
+.state { margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--card); font-weight: 600; }
+.state.free { border-color: var(--ok); }
+.state.blocked { border-color: var(--warn); }
+.banner { margin: 8px 0 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--bad);
+  color: var(--bad); background: var(--card); font-weight: 600; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.muted { color: var(--muted); font-size: 0.9rem; }
+.msg { margin: 6px 0 0; }
+.err { color: var(--bad); }
+button { font: inherit; min-height: 44px; padding: 8px 16px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+ul.sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+ul.sources label { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card); cursor: pointer; }
+ul.sources input { margin-top: 4px; width: 20px; height: 20px; flex: none; }
+.name { font-weight: 600; overflow-wrap: anywhere; }
+.screens { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.card { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 12px;
+  display: grid; gap: 6px; }
+.card.absent { background: var(--absent); }
+.now { margin: 0; overflow-wrap: anywhere; }
+.now.frames { color: var(--ok); }
+.now.failed { color: var(--bad); }
+footer { margin-top: 32px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Previsualización NDI</h1>
+  <p id="state" class="state" aria-live="polite">Conectando con el bridge…</p>
+  <p id="banner" class="banner" role="alert" hidden></p>
+
+  <h2>Fuentes</h2>
+  <div class="row">
+    <button id="refresh" type="button">Buscar fuentes</button>
+    <span id="sources-msg" class="muted" aria-live="polite"></span>
+  </div>
+  <ul id="sources" class="sources msg" role="radiogroup" aria-label="Fuentes NDI"></ul>
+
+  <h2>Pantallas</h2>
+  <div class="row" role="radiogroup" aria-label="Encaje">
+    <label><input type="radio" name="mode" value="fill" checked> Ajustar a la pantalla</label>
+    <label><input type="radio" name="mode" value="native"> Tamaño nativo</label>
+  </div>
+  <div class="row msg">
+    <button id="stop-all" type="button">Quitar todo</button>
+    <span id="screens-msg" class="muted" aria-live="polite"></span>
+  </div>
+  <div id="screens" class="screens msg"></div>
+
+  <footer class="row">
+    <span class="muted">Desconecta el portátil antes de la función.</span>
+  </footer>
+</main>
+<script>
+"use strict";
+
+// Every reason token the bridge returns (tests/test_ndi_page.py keeps this complete).
+const REASONS = {
+  ambiguous_output: "Hay varias pantallas con ese nombre",
+  ambiguous_source: "Hay varias fuentes con ese nombre",
+  auto_load_active: "El bridge va a cargar un proyecto automáticamente",
+  bad_body: "Petición mal formada",
+  bad_content_type: "Petición mal formada (no es JSON)",
+  bad_mode: "Modo de encaje desconocido",
+  bad_node: "No se encuentra esa máquina en el mapa de red",
+  bad_source: "Fuente mal indicada",
+  busy: "Esa máquina está terminando otra carga; prueba en unos segundos",
+  empty_source_name: "Fuente sin nombre",
+  engine_unknown: "No hay conexión con el motor",
+  internal_error: "Error interno del bridge (mira su journal)",
+  journal_unreadable: "El bridge no puede leer el journal de esa máquina",
+  load_failed: "El videocomposer no pudo abrir la fuente",
+  missing_output: "Falta la pantalla",
+  missing_source: "Elige primero una fuente",
+  no_region_lines: "El videocomposer no informa de sus salidas (¿versión antigua?)",
+  no_vc_answer: "Ningún videocomposer contesta (¿versión antigua o parado?)",
+  page_missing: "Falta la página en el paquete",
+  project_loaded: "Hay un proyecto cargado",
+  project_running: "Hay un proyecto en marcha",
+  raced_by_load: "Se cargó un proyecto mientras tanto",
+  rate_limited: "Ocupado, prueba otra vez",
+  relay_bad_upstream: "Dirección de la fuente no válida para el relay",
+  relay_listen_failed: "El controller no pudo abrir el relay",
+  relay_needs_controller_vc: "El videocomposer del controller es antiguo para el relay",
+  relay_needs_vc: "El videocomposer de esa máquina es antiguo para el relay",
+  relay_no_route: "El controller no tiene ruta hacia esa máquina",
+  relay_stalled: "El relay no pasa imagen",
+  relay_upstream_unreachable: "El controller no llega al emisor",
+  source_not_found: "Esa fuente ya no se ve",
+  stopped_or_reset_during_load: "Se quitó o se reinició durante la carga",
+  unknown_output: "Esa máquina no tiene esa salida",
+  network: "Sin conexión con el bridge",
+  bad_reply: "Respuesta del bridge ilegible"
+};
+
+// Every preview state (Verdict.state) the bridge reports.
+const STATES = {
+  pending: "conectando…",
+  "terminal-complete": "conectando…",
+  no_frames_yet: "conectada, esperando imagen",
+  frames: "con imagen",
+  failed: "falló",
+  unconfirmed: "sin confirmar",
+  superseded: "sustituida"
+};
+
+const BLOCKED = {
+  project_loaded: "Proyecto cargado",
+  project_running: "Proyecto en marcha",
+  engine_unknown: "No hay conexión con el motor",
+  auto_load_active: "Carga automática pendiente"
+};
+
+const STATUS_MS = 3000, SOURCES_MS = 15000, OUTPUTS_MS = 60000;
+
+let selected = null;        // source name (never "#n": the list can shift)
+let sourceList = [];
+let cards = new Map();      // screen alias -> card parts
+let screenList = [];
+let lastStatus = null;
+let blocked = undefined;    // undefined = not known yet
+let polling = false;
+let timers = [];
+const inflight = new Set(); // screen aliases with a request in flight
+const errors = new Map();   // screen alias -> last action error
+
+const $ = (id) => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) { e.className = cls; }
+  if (text !== undefined) { e.textContent = text; }
+  return e;
+}
+
+function say(reason) {
+  if (!reason) { return ""; }
+  return REASONS[reason] || String(reason);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function api(method, path, body, retry = true) {
+  const headers = {};   // no token: /ndi/* is open on the internal network (D30)
+  const opts = { method, headers, cache: "no-store" };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  let r;
+  try { r = await fetch(path, opts); } catch (e) { return { ok: false, reason: "network" }; }
+  let data;
+  try { data = await r.json(); } catch (e) { data = { ok: false, reason: "bad_reply" }; }
+  if (r.status === 429 && retry) {
+    await sleep(300);
+    return api(method, path, body, false);
+  }
+  return data || { ok: false, reason: "bad_reply" };
+}
+
+// ---------------- status ----------------
+
+function renderState(st) {
+  const p = $("state");
+  if (!st) { return; }
+  if (st.blocked) {
+    let text = BLOCKED[st.blocked] || say(st.blocked);
+    if (st.blocked === "project_loaded" || st.blocked === "project_running") {
+      const name = st.engine && st.engine.load;
+      if (name && name !== "unknown") { text += ": " + name; }
+    }
+    p.textContent = text + " — previsualizaciones bloqueadas";
+    p.className = "state blocked";
+  } else {
+    p.textContent = "Libre — se puede previsualizar";
+    p.className = "state free";
+  }
+}
+
+async function pollStatus() {
+  if (polling) { return; }
+  polling = true;
+  try {
+    const st = await api("GET", "status");
+    const banner = $("banner");
+    if (!st.ok) {
+      banner.textContent = say(st.reason || "network");
+      banner.hidden = false;
+      return;
+    }
+    banner.hidden = true;
+    lastStatus = st;
+    const was = blocked;
+    blocked = st.blocked || null;
+    renderState(st);
+    if (was !== undefined && was !== null && blocked === null) {
+      loadSources();   // just became free: the list may have changed meanwhile
+    }
+    updateCards();
+    updateSourcesBlocked();
+  } finally {
+    polling = false;
+  }
+}
+
+// ---------------- sources ----------------
+
+function updateSourcesBlocked() {
+  $("refresh").disabled = blocked !== null;
+  if (blocked) {
+    $("sources-msg").textContent = "No se buscan fuentes mientras haya un proyecto o sin motor.";
+  }
+}
+
+async function loadSources() {
+  if (blocked !== null) { updateSourcesBlocked(); return; }
+  $("refresh").disabled = true;
+  $("sources-msg").textContent = "Buscando…";
+  const data = await api("GET", "sources");
+  $("refresh").disabled = blocked !== null;
+  if (!data.ok) {
+    $("sources-msg").textContent = say(data.reason);
+    return;
+  }
+  sourceList = data.sources || [];
+  if (selected && !sourceList.some((s) => s.name === selected)) {
+    $("sources-msg").textContent = "La fuente elegida ya no se ve.";
+    selected = null;
+  } else if (!sourceList.length) {
+    $("sources-msg").textContent =
+      "No se ve ninguna fuente NDI. ¿El emisor está en la red del controller o de los nodos?";
+  } else {
+    $("sources-msg").textContent = "";
+  }
+  if (!selected && sourceList.length === 1) { selected = sourceList[0].name; }
+  renderSources();
+  updateCards();
+}
+
+function renderSources() {
+  const ul = $("sources");
+  ul.replaceChildren();
+  for (const s of sourceList) {
+    const li = el("li");
+    const label = el("label");
+    const radio = el("input");
+    radio.type = "radio";
+    radio.name = "source";
+    radio.checked = s.name === selected;
+    radio.addEventListener("change", () => { selected = s.name; updateCards(); });
+    const text = el("span");
+    text.append(el("span", "name", s.name));
+    text.append(el("br"));
+    text.append(el("span", "muted", "visto por: " + (s.seen_by || []).join(", ")));
+    label.append(radio, text);
+    li.append(label);
+    ul.append(li);
+  }
+}
+
+// ---------------- screens ----------------
+
+async function loadOutputs() {
+  const data = await api("GET", "outputs");
+  if (!data.ok) {
+    $("screens-msg").textContent = say(data.reason);
+    return;
+  }
+  $("screens-msg").textContent = "";
+  const list = data.outputs || [];
+  const same = list.length === screenList.length &&
+    list.every((s, i) => s.alias === screenList[i].alias && s.present === screenList[i].present &&
+                         s.name === screenList[i].name);
+  screenList = list;
+  if (!same) { buildCards(); }
+  updateCards();
+}
+
+function buildCards() {
+  const box = $("screens");
+  box.replaceChildren();
+  cards = new Map();
+  for (const sc of screenList) {
+    const card = el("div", "card");
+    const title = el("h3", null, sc.name || sc.alias);
+    const sub = el("span", "muted", sc.name ? sc.alias : sc.machine + " · sin nombre en la UI");
+    const now = el("p", "now");
+    now.setAttribute("aria-live", "polite");
+    const err = el("p", "now err");
+    err.setAttribute("aria-live", "polite");
+    const row = el("div", "row");
+    const show = el("button", "primary", "Mostrar");
+    show.type = "button";
+    show.addEventListener("click", () => doShow(sc.alias));
+    const stop = el("button", null, "Quitar");
+    stop.type = "button";
+    stop.addEventListener("click", () => doStop(sc.alias));
+    row.append(show, stop);
+    card.append(title, sub, now, err, row);
+    if (sc.present === false) {
+      card.classList.add("absent");
+      sub.textContent += " · no conectada";
+    }
+    box.append(card);
+    cards.set(sc.alias, { sc, card, now, err, show, stop });
+  }
+}
+
+function previewFor(alias) {
+  const list = (lastStatus && lastStatus.previews) || [];
+  return list.find((p) => p.screen && p.screen.alias === alias);
+}
+
+function updateCards() {
+  for (const [alias, c] of cards) {
+    const p = previewFor(alias);
+    let text = "—";
+    let cls = "now";
+    if (p && !p.stopped) {
+      if (p.wiped) {
+        text = p.source + " — borrada por un reset";
+      } else {
+        text = p.source + " — " + (STATES[p.confirm] || p.confirm);
+        if (p.route === "relay") { text += " · vía controller"; }
+        if (p.confirm === "frames") { cls += " frames"; }
+        if (p.confirm === "failed" || p.confirm === "unconfirmed") {
+          cls += " failed";
+          if (p.reason) { text += " (" + say(p.reason) + ")"; }
+        }
+      }
+    }
+    c.now.textContent = text;
+    c.now.className = cls;
+    c.err.textContent = errors.get(alias) || "";
+    const busy = inflight.has(alias);
+    c.show.disabled = busy || blocked !== null || !selected || c.sc.present === false;
+    c.show.title = blocked ? (BLOCKED[blocked] || say(blocked)) : (!selected ? "Elige una fuente" : "");
+    c.stop.disabled = busy || !alias;
+  }
+}
+
+function mode() {
+  const m = document.querySelector("input[name=mode]:checked");
+  return m ? m.value : "fill";
+}
+
+async function doShow(alias) {
+  if (!selected || !alias) { return; }
+  inflight.add(alias);
+  errors.delete(alias);
+  updateCards();
+  const data = await api("POST", "preview", { source: selected, output: alias, mode: mode() });
+  inflight.delete(alias);
+  if (!data.ok) { errors.set(alias, say(data.reason)); }
+  updateCards();
+  pollStatus();
+}
+
+async function doStop(alias) {
+  if (!alias) { return; }   // never "all" by accident: only Quitar todo sends {}
+  inflight.add(alias);
+  errors.delete(alias);
+  updateCards();
+  const data = await api("POST", "stop", { output: alias });
+  inflight.delete(alias);
+  if (!data.ok) { errors.set(alias, say(data.reason)); }
+  updateCards();
+  pollStatus();
+}
+
+async function doStopAll() {
+  $("stop-all").disabled = true;
+  const data = await api("POST", "stop", {});
+  $("stop-all").disabled = false;
+  $("screens-msg").textContent = data.ok ? "" : say(data.reason);
+  pollStatus();
+}
+
+// ---------------- timers ----------------
+
+function stopTimers() {
+  for (const t of timers) { clearInterval(t); }
+  timers = [];
+}
+
+function startTimers() {
+  stopTimers();
+  timers.push(setInterval(pollStatus, STATUS_MS));
+  timers.push(setInterval(() => { if (blocked === null) { loadSources(); } }, SOURCES_MS));
+  timers.push(setInterval(loadOutputs, OUTPUTS_MS));
+}
+
+async function refreshAll() {
+  await pollStatus();
+  await loadOutputs();
+  await loadSources();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopTimers();
+  } else {
+    refreshAll();
+    startTimers();
+  }
+});
+
+$("refresh").addEventListener("click", loadSources);
+$("stop-all").addEventListener("click", doStopAll);
+
+refreshAll();
+startTimers();
+</script>
+</body>
+</html>

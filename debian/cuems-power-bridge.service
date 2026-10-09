@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
 # SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 
 [Unit]
 Description=CUEMS power bridge (Shelly + Companion shutdown coordinator)
@@ -18,6 +19,13 @@ ExecStart=/usr/lib/cuems/bin/cuems-power-bridge
 Restart=on-failure
 RestartSec=3
 SyslogIdentifier=cuems-power-bridge
+# The NDI preview (/ndi/*) reads the videocomposers' answers from the journal:
+# the local one (systemd-journal) and the nodes' uploaded ones under
+# /var/log/journal/remote (systemd-journal-remote). Both groups exist wherever
+# cuems-common is installed (it depends on systemd-journal-remote); a missing
+# one fails the unit with 216/GROUP — the postinst checks. This gives the
+# bridge, a network-facing process, read access to every host's journal.
+SupplementaryGroups=systemd-journal systemd-journal-remote
 # Need to exec ssh and sudo systemctl poweroff — leave most defaults open.
 ProtectSystem=full
 ProtectHome=read-only

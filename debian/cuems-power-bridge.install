@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 # Ship default config under /usr/share for postinst-time copy + as
 # package-data fallback inside the venv.
 src/cuemspowerbridge/data/power-bridge.conf.default usr/share/cuems/
@@ -10,3 +13,4 @@ data/bin/cuems-power-bridge usr/bin/
 data/bin/cuems-power-bridge-deploy-keys usr/bin/
 data/bin/cuems-power-bridge-install-mjs usr/bin/
 data/bin/cuems-power-bridge-test-projector usr/bin/
+data/bin/cuems-ndi-preview usr/bin/
