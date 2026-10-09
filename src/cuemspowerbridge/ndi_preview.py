@@ -22,7 +22,9 @@ the bridge's own auto-load would reload a project at its next tick.
 from __future__ import annotations
 
 import asyncio
+import base64
 import glob
+import hashlib
 import ipaddress
 import json
 import logging
@@ -31,6 +33,7 @@ import re
 import socket
 import time
 from dataclasses import dataclass, field
+from importlib import resources
 from typing import Any, Callable, Iterable
 
 from aiohttp import web
@@ -54,6 +57,8 @@ OUTPUTS_CACHE_S = 60.0
 RESOLVE_TIMEOUT_S = 2.0
 LOAD_RECHECK_S = 1.0
 POLL_S = 0.5
+STATUS_CACHE_S = 1.0     # rev 11: pages poll status; one computation per second
+PAGE_FILE = "ndi_page.html"
 FIT_MODES = ("fill", "native")
 
 # An NDI source's full name: "MACHINE (source)".
@@ -225,6 +230,32 @@ def guard(engine: Any, auto_load_active: bool, force_unknown_engine: bool = Fals
     if auto_load_active:
         return PreviewError(409, "auto_load_active")
     return None
+
+
+def _inline_hash(html: str, tag: str) -> str:
+    """CSP hash source of the page's one inline <tag> block (rev 11).
+    HTML comments are skipped: a tag named in one would shift the match."""
+    m = re.search(rf"<{tag}>(.*?)</{tag}>", re.sub(r"<!--.*?-->", "", html, flags=re.S), re.S)
+    if not m:
+        return "'none'"
+    digest = hashlib.sha256(m.group(1).encode("utf-8")).digest()
+    return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+
+def load_page() -> tuple[bytes, dict[str, str]] | None:
+    """The operator page and its headers, or None if the package lacks it."""
+    try:
+        html = resources.files("cuemspowerbridge.data").joinpath(PAGE_FILE).read_text("utf-8")
+    except (OSError, ModuleNotFoundError) as e:
+        log.warning("ndi-preview: page %s not available (%s)", PAGE_FILE, e)
+        return None
+    csp = ("default-src 'none'; connect-src 'self'; img-src 'self'; "
+           f"script-src {_inline_hash(html, 'script')}; style-src {_inline_hash(html, 'style')}; "
+           "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+    headers = {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache",
+               "Content-Security-Policy": csp, "X-Frame-Options": "DENY",
+               "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
+    return html.encode("utf-8"), headers
 
 
 def is_exact_name(name: str) -> bool:
@@ -517,6 +548,9 @@ class NdiPreview:
         self._previews: dict[str, _Request] = {}     # by screen alias (D24)
         self._relays: dict[str, Relay] = {}          # by "<vc address>|<connector>"
         self._tasks: set[asyncio.Task] = set()
+        self._status_cache: dict[bool, tuple[float, dict]] = {}   # keyed by `authorized` (D22)
+        self._status_tasks: dict[bool, asyncio.Task] = {}
+        self._page = load_page()
         self.vc_port = int(self.cfg.extras.get("ndi_vc_osc_port", VC_OSC_PORT))
 
     # ---------------- plumbing ----------------
@@ -614,8 +648,11 @@ class NdiPreview:
     async def sources(self) -> list[SeenSource]:
         """Every source any VC of the cluster sees, sorted by name, with who
         sees it. `#n` in show indexes this list."""
-        if self.bridge.engine.running == "yes":
-            raise PreviewError(409, "project_running")
+        # Not while a project is loaded or running, nor with the engine
+        # unknown: discovery would poke every VC of a show (rev 11.1).
+        err = guard(self.bridge.engine, False)
+        if err:
+            raise err
         machines = await self._machines()
         targets = await asyncio.gather(*(self.resolve_target(m) for m in machines),
                                        return_exceptions=True)
@@ -755,6 +792,7 @@ class NdiPreview:
             req = _Request(screen, target, name, mode, mark, time.time(),
                            filepath=filepath, relay=new_relay)
             self._previews[screen.alias] = req
+            self._status_cache.clear()
         except BaseException:
             if new_relay is not None:
                 await self._close_relay(key, "show failed")
@@ -889,12 +927,27 @@ class NdiPreview:
         if not output_arg:
             for key in list(self._relays):
                 await self._close_relay(key, "stop")
+        self._status_cache.clear()
         log.info("ndi-preview: stop sent to %s", ", ".join(s["alias"] for s in stopped))
         return stopped
 
     async def status(self, authorized: bool = True) -> dict:
         """Per screen (D24). `authorized` = the request carried a valid token:
-        only then do relay upstream addresses and byte counts appear (D22)."""
+        only then do relay upstream addresses and byte counts appear (D22).
+        Pages poll this, so one computation serves every caller for
+        STATUS_CACHE_S, kept apart per `authorized` (rev 11.1)."""
+        cached = self._status_cache.get(authorized)
+        if cached and time.monotonic() - cached[0] < STATUS_CACHE_S:
+            return cached[1]
+        task = self._status_tasks.get(authorized)
+        if task is None or task.done():
+            task = self._spawn(self._status(authorized))
+            self._status_tasks[authorized] = task
+        result = await asyncio.shield(task)
+        self._status_cache[authorized] = (time.monotonic(), result)
+        return result
+
+    async def _status(self, authorized: bool) -> dict:
         eng = self.bridge.engine
         previews = []
         for alias, req in sorted(self._previews.items()):
@@ -913,8 +966,10 @@ class NdiPreview:
                 except PreviewError:
                     pass
             previews.append(req.public(authorized))
+        blocked = guard(eng, self.bridge.auto_load_active())
         return {
             "engine": {"running": eng.running, "load": eng.load, "armed": eng.armed},
+            "blocked": blocked.reason if blocked else None,
             "auto_load": self.bridge.auto_load_state(),
             "vc_versions": dict(self._versions),
             "previews": previews,
@@ -964,6 +1019,8 @@ class NdiPreview:
     # ---------------- HTTP ----------------
 
     def register(self, app: web.Application) -> None:
+        app.router.add_get("/ndi", self.h_page_redirect)
+        app.router.add_get("/ndi/", self.h_page)
         app.router.add_get("/ndi/sources", self.h_sources)
         app.router.add_get("/ndi/outputs", self.h_outputs)
         app.router.add_post("/ndi/preview", self.h_preview)
@@ -981,11 +1038,33 @@ class NdiPreview:
     def _fail(e: PreviewError) -> web.Response:
         return web.json_response({"ok": False, "reason": e.reason, **e.extra}, status=e.status)
 
-    async def _body(self, request: web.Request) -> dict:
-        try:
-            return dict(await request.json() or {})
-        except Exception:
+    @staticmethod
+    async def _body(request: web.Request) -> dict:
+        """A POST body: JSON only (D27: a plain form or text/plain POST from
+        any web page would otherwise reach the bridge without a preflight).
+        An empty body is {}; anything unparseable is refused, never read as
+        {} (that would mean "every screen" to stop)."""
+        if request.content_type != "application/json":
+            raise PreviewError(415, "bad_content_type", expected="application/json")
+        raw = await request.read()
+        if not raw.strip():
             return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise PreviewError(400, "bad_body")
+        if not isinstance(data, dict):
+            raise PreviewError(400, "bad_body")
+        return data
+
+    async def h_page(self, request: web.Request) -> web.Response:
+        if self._page is None:
+            return self.bridge._err("page_missing", 404)
+        body, headers = self._page
+        return web.Response(body=body, headers=headers)
+
+    async def h_page_redirect(self, request: web.Request) -> web.Response:
+        raise web.HTTPMovedPermanently(location="ndi/")
 
     async def h_sources(self, request: web.Request) -> web.Response:
         if (r := self._auth(request, "ndi_sources")):
@@ -1004,7 +1083,9 @@ class NdiPreview:
         if (r := self._auth(request, "ndi_outputs")):
             return r
         try:
-            screens = await self.screens(live=True)
+            # The live check asks every VC for its outputs: not during a show.
+            live = guard(self.bridge.engine, False) is None
+            screens = await self.screens(live=live)
         except PreviewError as e:
             return self._fail(e)
         return web.json_response({"ok": True, "outputs": [s.public() for s in screens]})
@@ -1012,18 +1093,20 @@ class NdiPreview:
     async def h_preview(self, request: web.Request) -> web.Response:
         if (r := self._auth(request, "ndi_preview")):
             return r
-        body = await self._body(request)
-        source = body.get("source") or request.query.get("source")
-        output = body.get("output") or request.query.get("output")
+        try:
+            body = await self._body(request)
+        except PreviewError as e:
+            return self._fail(e)
+        source = body.get("source")
+        output = body.get("output")
         if not source:
             return self.bridge._err("missing_source", 400)
         if not output:
             return self.bridge._err("missing_output", 400)
-        wait = bool(body.get("wait")) or request.query.get("wait") == "1"
+        wait = bool(body.get("wait"))
         try:
             result = await self.show(
-                str(source), str(output),
-                str(body.get("mode") or request.query.get("mode") or "fill"),
+                str(source), str(output), str(body.get("mode") or "fill"),
                 wait=wait, force_unknown_engine=bool(body.get("force_unknown_engine")))
         except PreviewError as e:
             return self._fail(e)
@@ -1032,10 +1115,16 @@ class NdiPreview:
     async def h_stop(self, request: web.Request) -> web.Response:
         if (r := self._auth(request, "ndi_stop")):
             return r
-        body = await self._body(request)
-        output = body.get("output") or request.query.get("output")
         try:
-            stopped = await self.stop(str(output) if output else None)
+            body = await self._body(request)
+            if "output" in body:
+                # Named but empty is a mistake, not "all": only {} clears all.
+                output = body["output"]
+                if not output or not isinstance(output, (str, int)):
+                    raise PreviewError(400, "missing_output")
+                stopped = await self.stop(str(output))
+            else:
+                stopped = await self.stop(None)
         except PreviewError as e:
             return self._fail(e)
         return web.json_response({"ok": True, "stopped": stopped})

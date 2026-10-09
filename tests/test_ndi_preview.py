@@ -310,6 +310,7 @@ def _fast(monkeypatch):
     monkeypatch.setattr(ndi, "POLL_S", 0.01)
     monkeypatch.setattr(ndi, "LOAD_RECHECK_S", 0.0)
     monkeypatch.setattr(ndi, "CONFIRM_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(ndi, "STATUS_CACHE_S", 0.0)
 
 
 def _arm(pv, sent, lines):
