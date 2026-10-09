@@ -1211,10 +1211,29 @@ Add buttons using Companion's **HTTP** module:
 | SHUTDOWN | POST | `http://controller.local:8478/shutdown` | `X-Auth-Token: <token>` |
 | PROY ON | POST | `http://localhost:8478/poweron?wait=1` | `X-Auth-Token: <token>` |
 | PROY OFF | POST | `http://localhost:8478/poweroff?wait=1` | `X-Auth-Token: <token>` |
+| NDI → *screen* | POST | `http://localhost:8478/ndi/preview` | `X-Auth-Token: <token>`; body `{"source":"#1","output":"<screen>"}` |
+| QUITAR *screen* | POST | `http://localhost:8478/ndi/stop` | `X-Auth-Token: <token>`; body `{"output":"<screen>"}` |
+| QUITAR TODO | POST | `http://localhost:8478/ndi/stop` | `X-Auth-Token: <token>`; body `{}` |
 
 PROY ON / PROY OFF switch only this controller's projectors (displays, not machines). With
 `?wait=1` the button can show the per-device result; Companion's HTTP timeout must exceed the
 wait bound (see `POST /poweron` / `POST /poweroff`), otherwise drop `?wait=1`.
+
+**NDI preview buttons (montajes).** One NDI button and one QUITAR button per screen,
+set up once per cluster, since the screens do not change between montajes. `<screen>` is the
+screen's UI name ("Monitor derecha") or `<role_id>_<connector>` (`node01_HDMI-A-1`); run
+`cuems-ndi-preview outputs` on the controller to list them. Which machine drives the screen,
+and whether the source goes direct or through the controller's relay, is the bridge's
+business. Sources change from montaje to montaje, so the buttons name **`#1`**: the first
+source of the cluster-wide list, which is sorted alphabetically. With one NDI sender on the
+network (the usual montaje) that is always the right one, and nothing needs redoing. With
+several, `#1` is whichever sorts first. A button can instead carry part of the sender's name
+(`"source":"PORTATIL"`): any unique substring matches, and two matches give
+`409 ambiguous_source`. Leave out `"wait"`. The bridge answers at once (`202`; refusals such
+as `409 project_loaded` or `404 source_not_found` are immediate too), whereas `wait:true`
+holds the reply up to 15 s, which can outlast Companion's HTTP timeout. A second NDI button on the
+same screen replaces what it shows. `GET /ndi/status` (no token) tells what each screen
+shows.
 
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).
