@@ -273,7 +273,7 @@ class Target:
 
     def public(self) -> dict:
         return {"node": None if self.local else self.key, "address": self.address,
-                "via": self.via, "iface": self.iface}
+                "resolved": self.via, "iface": self.iface}
 
 
 async def route_dev(addr: str) -> str | None:

@@ -64,7 +64,7 @@ def _call(base: str, token: str, method: str, path: str, query: dict | None = No
 
 def _where(r: dict) -> str:
     node = r.get("node") or "controller (local VC)"
-    via = r.get("via") or ""
+    via = r.get("resolved") or ""
     iface = f" on {r['iface']}" if r.get("iface") else ""
     return f"{node} at {r.get('address', '?')} ({via}{iface})"
 
