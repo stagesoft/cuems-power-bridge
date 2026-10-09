@@ -12,6 +12,13 @@ cuems-power-bridge (0.3.0-10) UNRELEASED; urgency=medium
     videocomposer must log "NDI receive transport: base TCP" (>= 0.1.2-8).
     New refusals relay_needs_vc, relay_needs_controller_vc,
     relay_upstream_unreachable; /ndi/status shows relay state.
+  * Operator page (plan rev 11): GET /ndi/ serves a self-contained page
+    (sources, screens, Mostrar/Quitar, plain-Spanish refusals) with a strict
+    CSP; no per-site setup. POST /ndi/* now takes JSON only (415
+    bad_content_type otherwise, 400 bad_body when unparseable) and a stop
+    with an empty output is refused instead of clearing every screen.
+    /ndi/sources is refused while a project is loaded or the engine is
+    unknown; /ndi/status carries "blocked" and is computed once a second.
   * The unit joins systemd-journal and systemd-journal-remote: the preview
     reads the videocomposers' answers from the local and uploaded journals.
     postinst warns if either group is missing (the unit would fail 216/GROUP).

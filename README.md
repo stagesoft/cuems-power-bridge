@@ -1233,7 +1233,16 @@ several, `#1` is whichever sorts first. A button can instead carry part of the s
 as `409 project_loaded` or `404 source_not_found` are immediate too), whereas `wait:true`
 holds the reply up to 15 s, which can outlast Companion's HTTP timeout. A second NDI button on the
 same screen replaces what it shows. `GET /ndi/status` (no token) tells what each screen
-shows.
+shows. Bodies must be JSON with `Content-Type: application/json` (Companion's JSON body type);
+any other type is refused with `415 bad_content_type`.
+
+**Without Companion: the NDI page.** Open `http://<controller>:8478/ndi/` on a phone, tablet or
+laptop on the controller's network or WiFi. It lists the cluster's sources and screens by
+itself (no per-site setup): pick a source, press **Mostrar** on a screen, **Quitar** to take it
+off. The top line says whether previews are possible (a loaded or running project, an
+unknown engine or a pending auto-load block them); refusals are shown in plain Spanish. When
+`shared_token` is set, the page asks for it once and keeps it in that browser ("Olvidar
+contraseña" clears it).
 
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).
