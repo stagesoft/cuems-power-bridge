@@ -7,7 +7,7 @@
 
 A node only reaches its own cluster segment. The controller also sits on the
 venue LAN and on its WiFi AP, so it can reach a laptop there. With the node's
-NDI receive forced to the base TCP connection (videocomposer >= 0.1.2-8,
+NDI receive forced to the base TCP connection (videocomposer >= 0.1.2-7,
 "NDI receive transport: base TCP"), the whole stream is one TCP connection,
 and this relay copies it untouched: no decode, no re-encode.
 

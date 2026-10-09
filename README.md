@@ -196,7 +196,7 @@ The central coordinator. Owns the HTTP server, the state machine, and all sub-cl
   `/ndi/stop`, `/ndi/status`; CLI `cuems-ndi-preview`) — NDI preview for montajes: shows an
   NDI source on any node's output while no project is loaded, by driving that node's
   videocomposer over OSC (`ndi://` load, `fit_output`, `ndi/discover`; videocomposer
-  ≥ 0.1.2-8) and reading its answers back from the journal. Refused while a project is
+  ≥ 0.1.2-7) and reading its answers back from the journal. Refused while a project is
   loaded or running and while the bridge's own auto-load is pending. See CLAUDE.md.
 * **`Bridge.handle_shutdown(request)`** — `POST /shutdown`; acquires `asyncio.Lock`, runs
   the refuse-if-running guard, then delegates to `_run_shutdown()`.

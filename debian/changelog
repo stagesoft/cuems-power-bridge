@@ -1,15 +1,15 @@
-cuems-power-bridge (0.3.0-10) UNRELEASED; urgency=medium
+cuems-power-bridge (0.3.0-10) unstable; urgency=medium
 
   * NDI preview for montajes (ClickUp 869ekxuez): GET /ndi/sources,
     GET /ndi/outputs, POST /ndi/preview, POST /ndi/stop, GET /ndi/status and
     the cuems-ndi-preview CLI. Shows an NDI source on any node's output while
-    no project is loaded; needs cuems-videocomposer >= 0.1.2-8 on the target.
+    no project is loaded; needs cuems-videocomposer >= 0.1.2-7 on the target.
     Refused while a project is loaded or running, and while the bridge's own
     auto-load would reload one (409 auto_load_active).
   * Relay (plan rev 9): a node gets a source it cannot reach itself (a laptop
     on the venue LAN or the controller's WiFi) through a TCP relay on the
     controller's cluster-side address, without re-encoding; the node's
-    videocomposer must log "NDI receive transport: base TCP" (>= 0.1.2-8).
+    videocomposer must log "NDI receive transport: base TCP" (>= 0.1.2-7).
     New refusals relay_needs_vc, relay_needs_controller_vc,
     relay_upstream_unreachable; /ndi/status shows relay state.
   * Operator page (plan rev 11): GET /ndi/ serves a self-contained page
@@ -30,7 +30,7 @@ cuems-power-bridge (0.3.0-10) UNRELEASED; urgency=medium
   * debian/control and the postinst comment no longer claim cuems-common
     ships the unit: this package does.
 
- -- Ion Reguera <ion@stagelab.coop>  Fri, 09 Oct 2026 12:55:50 +0200
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 09 Oct 2026 21:22:33 +0200
 
 cuems-power-bridge (0.3.0-9) unstable; urgency=medium
 

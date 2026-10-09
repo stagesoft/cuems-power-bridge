@@ -8,7 +8,7 @@ Plans/2026-10-08-ndi-preview-montajes.md).
 
 The bridge only drives the videocomposers (VC, UDP OSC :7000). Placement and
 discovery happen inside each VC (`fit_output`, `ndi/discover`, deb >=
-0.1.2-8). The VC has no OSC reply channel, so its answers are read back from
+0.1.2-7). The VC has no OSC reply channel, so its answers are read back from
 the journal on the controller: the local VC's own journal, or the node's
 uploaded journal under /var/log/journal/remote/. The lines matched here are
 the VC's `remote/JournalContract.h`, pinned by its unit tests — change both
@@ -670,7 +670,7 @@ class NdiPreview:
                     "controller" if m == "local" else m] = src.address
         if not answered:
             raise PreviewError(504, "no_vc_answer",
-                               hint="no videocomposer answered ndi/discover (older than 0.1.2-8?)")
+                               hint="no videocomposer answered ndi/discover (older than 0.1.2-7?)")
         return sorted(seen.values(), key=lambda s: s.name.lower())
 
     async def _list(self, target: Target, timeout: int = 3) -> list[Source]:
@@ -702,7 +702,7 @@ class NdiPreview:
                 return found
         version = await self.journal.version(target)
         raise PreviewError(504, "no_vc_answer", vc_version=version,
-                           hint="no 'NDI discover: done' line: VC older than 0.1.2-8, "
+                           hint="no 'NDI discover: done' line: VC older than 0.1.2-7, "
                                 "journal lag, or not running")
 
     async def _legacy_discover(self, seconds: int) -> list[Source] | None:
@@ -743,7 +743,7 @@ class NdiPreview:
         outs = parse_outputs(msgs)
         if not outs:
             raise PreviewError(503, "no_region_lines",
-                               hint="VC older than 0.1.2-8 (no 'region' lines), or no answer")
+                               hint="VC older than 0.1.2-7 (no 'region' lines), or no answer")
         self._outputs_cache[target.address] = (time.monotonic(), outs)
         return target, outs
 
@@ -895,7 +895,7 @@ class NdiPreview:
             version = self._versions.get(req.target.address) or await self.journal.version(req.target)
             if version is None:
                 req.verdict.reason += (" — no VC version line seen (VC older than "
-                                       "0.1.2-8, journal lag, or a vacuumed journal)")
+                                       "0.1.2-7, journal lag, or a vacuumed journal)")
         except PreviewError as e:
             req.verdict = Verdict(state="unconfirmed", reason=e.reason)
         except Exception:
@@ -984,11 +984,11 @@ class NdiPreview:
             raise PreviewError(409, "relay_needs_vc", node=target.key,
                                vc_version=await self.journal.version(target), transport=line,
                                hint="this machine's videocomposer cannot take a relayed source "
-                                    "(needs >= 0.1.2-8 with base-TCP NDI receive)")
+                                    "(needs >= 0.1.2-7 with base-TCP NDI receive)")
         if not address:
             raise PreviewError(409, "relay_needs_controller_vc",
                                hint="the controller's videocomposer reports no source address "
-                                    "(needs >= 0.1.2-8)")
+                                    "(needs >= 0.1.2-7)")
 
     async def _open_relay(self, target: Target, key: str, address: str) -> Relay:
         listen_ip = await self._route_src(target.address)
