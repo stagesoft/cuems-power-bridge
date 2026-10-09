@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 Source: cuems-power-bridge
 Section: python
 Priority: optional
@@ -20,7 +23,8 @@ Depends: ${misc:Depends},
          python3 (>= 3.11),
          python3-systemd (>= 235),
          openssh-client,
-         iputils-ping
+         iputils-ping,
+         iproute2
 Description: CUEMS power bridge — Shelly + Companion shutdown coordinator
  cuems-power-bridge is the HTTP-fronted coordinator that orchestrates
  orderly cluster shutdown when an operator flips the wired Shelly Pro 1
@@ -40,7 +44,10 @@ Description: CUEMS power bridge — Shelly + Companion shutdown coordinator
  Auto-loads a configurable show project at boot via the editor's
  project_ready WebSocket action, matching the proven wsclient.py pattern.
  .
+ Fronts an NDI preview for montajes (/ndi/*, cuems-ndi-preview): shows an
+ NDI source on any node's output while no project is loaded.
+ .
  Installs into /usr/lib/cuems/ virtualenv (provided by cuems-utils).
  Console entry points at /usr/lib/cuems/bin/{cuems-power-bridge,
- cuems-power-bridge-deploy-keys,cuems-wsclient}. systemd unit is shipped
- in cuems-common.
+ cuems-power-bridge-deploy-keys,cuems-ndi-preview,cuems-wsclient}. The
+ systemd unit is shipped by this package.
