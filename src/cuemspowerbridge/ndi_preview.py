@@ -37,6 +37,7 @@ from aiohttp import web
 
 from . import network_map
 from .engine_state import UNKNOWN
+from .ndi_relay import Relay, RelayError
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ _FIT_UNKNOWN_RE = re.compile(r"^fit_output: unknown output '([^']*)' \(have: (.*
 class Source:
     name: str
     address: str
+    via: str = "direct"   # "controller": only the controller sees it (relayed, rev 9)
 
 
 def parse_discover(messages: Iterable[str]) -> tuple[list[Source] | None, bool]:
@@ -151,9 +153,11 @@ class Verdict:
     unknown_output: str | None = None
 
 
-def classify(messages: list[str], source: str) -> Verdict:
-    """Classify a show request from the VC lines that followed its send."""
-    url = f"ndi://{source}"
+def classify(messages: list[str], source: str, filepath: str | None = None) -> Verdict:
+    """Classify a show request from the VC lines that followed its send.
+    `filepath` is what was loaded (the relay's address form, rev 9); by
+    default the name form."""
+    url = filepath or f"ndi://{source}"
     complete = f"Async load complete: {url} (cue ID: {LAYER_ID})"
     failed = f"Async load failed for: {url} (cue ID: {LAYER_ID})"
     gone = f"Layer no longer exists for cue ID: {LAYER_ID}"
@@ -285,6 +289,20 @@ async def route_dev(addr: str) -> str | None:
     return m.group(1) if m else None
 
 
+async def route_src(addr: str) -> str | None:
+    """The source address the controller uses towards addr (`ip -o route get`):
+    where a relay listens so the node can reach it."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ip", "-o", "route", "get", addr,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    m = re.search(r"\bsrc (\S+)", out.decode(errors="replace"))
+    return m.group(1) if m else None
+
+
 async def resolve_name(name: str, timeout: float = RESOLVE_TIMEOUT_S) -> str | None:
     loop = asyncio.get_running_loop()
     try:
@@ -386,6 +404,19 @@ class Journal:
         entries = await self._runner([*args, *pos, f"SYSLOG_IDENTIFIER={VC_IDENTIFIER}"])
         return [_message(e) for e in entries]
 
+    async def transport(self, target: Target) -> str | None:
+        """The VC's latest "NDI receive transport: ..." line (any boot), or
+        None (a VC older than rev 9 never logs one)."""
+        args, _ = self._source_args(target)
+        try:
+            entries = await self._runner(
+                [*args, "-r", "-n", "1", "--grep", "^NDI receive transport: ",
+                 f"SYSLOG_IDENTIFIER={VC_IDENTIFIER}"])
+        except Exception:
+            return None
+        msgs = [_message(e) for e in entries]
+        return msgs[0] if msgs else None
+
     async def version(self, target: Target) -> str | None:
         args, _ = self._source_args(target)
         try:
@@ -409,31 +440,41 @@ class _Request:
     mode: str
     mark: dict
     sent_at: float
+    filepath: str = ""
+    relay: Relay | None = None
     verdict: Verdict = field(default_factory=Verdict)
     confirmed_at: float | None = None
     raced_by_load: bool = False
     wiped: bool = False
     stopped: bool = False
 
-    def public(self) -> dict:
-        return {**self.target.public(), "source": self.source, "output": self.output,
-                "mode": self.mode, "confirm": self.verdict.state,
-                "reason": self.verdict.reason, "fit": self.verdict.fit,
-                "raced_by_load": self.raced_by_load, "wiped": self.wiped,
-                "stopped": self.stopped}
+    def public(self, with_upstream: bool = True) -> dict:
+        out = {**self.target.public(), "source": self.source, "output": self.output,
+               "mode": self.mode, "via": "relay" if self.relay else "direct",
+               "confirm": self.verdict.state,
+               "reason": self.verdict.reason, "fit": self.verdict.fit,
+               "raced_by_load": self.raced_by_load, "wiped": self.wiped,
+               "stopped": self.stopped}
+        if self.relay is not None:
+            out["relay"] = self.relay.stats(with_upstream)
+        return out
 
 
 class NdiPreview:
     def __init__(self, bridge: Any, journal: Journal | None = None,
                  osc_send: Callable[[str, int, str, list], None] | None = None,
                  resolver: Callable[[str], Any] | None = None,
-                 router: Callable[[str], Any] | None = None):
+                 router: Callable[[str], Any] | None = None,
+                 src_router: Callable[[str], Any] | None = None):
         self.bridge = bridge
         self.cfg = bridge.cfg
         self.journal = journal or Journal()
         self._osc_send = osc_send or self._udp_send
         self._resolve = resolver or resolve_name
         self._route = router or route_dev
+        self._route_src = src_router or route_src
+        # Relays by node VC address (rev 9): one preview per node at a time.
+        self._relays: dict[str, Relay] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._discovering: dict[str, asyncio.Task] = {}
         self._sources_cache: dict[str, tuple[float, list[Source]]] = {}
@@ -505,17 +546,34 @@ class NdiPreview:
     # ---------------- discovery ----------------
 
     async def sources(self, node: str | None, timeout: int = 3) -> tuple[Target, list[Source]]:
+        """The sources a target can show: its own (sorted), then, for a node,
+        the ones only the controller sees, marked via="controller" (shown
+        through the relay, rev 9). `#n` indexes this list."""
         if self.bridge.engine.running == "yes":
             raise PreviewError(409, "project_running")
         target = await self.resolve_target(node)
+        if target.local:
+            return target, await self._list(target, timeout)
+        own, ctrl = await asyncio.gather(
+            self._list(target, timeout),
+            self._list(Target("local", "127.0.0.1", "loopback"), timeout),
+            return_exceptions=True)
+        if isinstance(own, BaseException):
+            raise own
+        names = {s.name for s in own}
+        extra = [] if isinstance(ctrl, BaseException) else [
+            Source(s.name, s.address, via="controller") for s in ctrl if s.name not in names]
+        return target, list(own) + sorted(extra, key=lambda s: s.name.lower())
+
+    async def _list(self, target: Target, timeout: int = 3) -> list[Source]:
         cached = self._sources_cache.get(target.address)
         if cached and time.monotonic() - cached[0] < SOURCES_CACHE_S:
-            return target, cached[1]
+            return cached[1]
         task = self._discovering.get(target.address)
         if task is None or task.done():
             task = self._spawn(self._discover(target, max(1, min(10, timeout))))
             self._discovering[target.address] = task
-        return target, await asyncio.shield(task)
+        return await asyncio.shield(task)
 
     async def _discover(self, target: Target, seconds: int) -> list[Source]:
         self.journal.check_readable(target)
@@ -593,15 +651,11 @@ class NdiPreview:
         if lock.locked():
             raise PreviewError(409, "busy", hint="a preview request on this VC is in flight")
         await lock.acquire()
+        new_relay: Relay | None = None
         try:
             self.journal.check_readable(target)
-            sources = None
-            cached = self._sources_cache.get(target.address)
-            if cached and time.monotonic() - cached[0] < SOURCES_CACHE_S:
-                sources = cached[1]
-            if source_arg.startswith("#") or not (is_exact_name(source_arg) or sources):
-                _, sources = await self.sources(node)
-            source = pick_source(source_arg, sources)
+            entry = await self._choose_source(target, node, source_arg)
+            source = entry.name
             if output:
                 outs = self._outputs_cache.get(target.address)
                 if outs and time.monotonic() - outs[0] < OUTPUTS_CACHE_S:
@@ -611,18 +665,31 @@ class NdiPreview:
             err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine)
             if err:
                 raise err
+            if entry.via == "controller":
+                await self._relay_preconditions(target, entry)
             mark = await self.journal.mark(target)
             self._send(target, "/videocomposer/layer/unload", LAYER_ID)
-            self._send(target, "/videocomposer/layer/load", f"ndi://{source}", LAYER_ID)
+            # The previous relay goes only after the unload, so the old layer
+            # does not sit reconnecting to a closed port.
+            await self._close_relay(target.address, "replaced")
+            filepath = f"ndi://{source}"
+            if entry.via == "controller":
+                new_relay = await self._open_relay(target, entry)
+                filepath = f"ndi://@{new_relay.address}"
+            self._send(target, "/videocomposer/layer/load", filepath, LAYER_ID)
             fit_args = [output, mode] if output else [mode]
             self._send(target, f"/videocomposer/layer/{LAYER_ID}/fit_output", *fit_args)
             self._send(target, f"/videocomposer/layer/{LAYER_ID}/zorder", 1000)
             self._send(target, f"/videocomposer/layer/{LAYER_ID}/visible", 1)
-            log.info("ndi-preview: %s on %s (%s) output=%s mode=%s", source,
-                     target.key, target.address, output or "(first)", mode)
-            req = _Request(target, source, output, mode, mark, time.time())
+            log.info("ndi-preview: %s on %s (%s) output=%s mode=%s%s", source,
+                     target.key, target.address, output or "(first)", mode,
+                     f" via relay {new_relay.address}" if new_relay else "")
+            req = _Request(target, source, output, mode, mark, time.time(),
+                           filepath=filepath, relay=new_relay)
             self._last = req
         except BaseException:
+            if new_relay is not None:
+                await self._close_relay(target.address, "show failed")
             lock.release()
             raise
         # The lock is held until the journal shows how this load ended: two
@@ -655,14 +722,21 @@ class NdiPreview:
                                     "preview send; preview unloaded")
                 msgs = await self.journal.read(req.target, req.mark)
                 self._note_version(req.target, msgs)
-                v = classify(msgs, req.source)
+                v = classify(msgs, req.source, req.filepath)
+                if (req.relay is not None and req.relay.upstream_errors
+                        and not req.relay.bytes_to_node):
+                    v = Verdict(state="failed", reason="relay_upstream_unreachable")
                 if v.state == "terminal-complete":
                     continue
                 if v.state != "pending":
                     if v.state in ("frames", "no_frames_yet"):
                         # One more read so the re-fit on the real size is seen.
                         await asyncio.sleep(POLL_S)
-                        v = classify(await self.journal.read(req.target, req.mark), req.source)
+                        v = classify(await self.journal.read(req.target, req.mark),
+                                     req.source, req.filepath)
+                        if (req.relay is not None and v.state == "frames"
+                                and not req.relay.bytes_to_node):
+                            v = Verdict(state="failed", reason="relay_stalled", fit=v.fit)
                     req.verdict = v
                     req.confirmed_at = time.time()
                     if v.reason == "unknown_output":
@@ -703,17 +777,22 @@ class NdiPreview:
             targets.append(await self.resolve_target(node))
         for t in targets:
             self._send(t, "/videocomposer/layer/unload", LAYER_ID)
+        for t in targets:
+            await self._close_relay(t.address, "stop")
         if self._last and any(t.address == self._last.target.address for t in targets):
             self._last.stopped = True
         log.info("ndi-preview: stop sent to %s", ", ".join(t.address for t in targets))
         return [t.public() for t in targets]
 
-    async def status(self) -> dict:
+    async def status(self, authorized: bool = True) -> dict:
+        """`authorized` = the request carried a valid token: only then do the
+        relay's upstream address and byte counts appear (D22)."""
         eng = self.bridge.engine
         body: dict = {
             "engine": {"running": eng.running, "load": eng.load, "armed": eng.armed},
             "auto_load": self.bridge.auto_load_state(),
             "vc_versions": dict(self._versions),
+            "relays": [r.stats(authorized) for r in self._relays.values()],
             "last": None,
         }
         req = self._last
@@ -734,8 +813,69 @@ class NdiPreview:
                         req.wiped = True
                 except PreviewError:
                     pass
-            body["last"] = req.public()
+            body["last"] = req.public(authorized)
         return body
+
+    # ---------------- relay (rev 9) ----------------
+
+    async def _choose_source(self, target: Target, node: str | None, arg: str) -> Source:
+        """Pick the source, direct or relayed. An exact name the node itself
+        lists goes direct without asking the controller."""
+        own = self._sources_cache.get(target.address)
+        if (is_exact_name(arg) and own and time.monotonic() - own[0] < SOURCES_CACHE_S
+                and any(s.name == arg for s in own[1])):
+            return next(s for s in own[1] if s.name == arg)
+        if target.local and is_exact_name(arg) and not arg.startswith("#"):
+            cached = own[1] if own else None
+            if not cached:
+                return Source(arg, "")  # rev-8 fast path: let the VC look for it
+        _, merged = await self.sources(node)
+        name = pick_source(arg, merged)
+        for s in merged:
+            if s.name == name:
+                return s
+        if target.local:
+            return Source(name, "")
+        raise PreviewError(404, "source_not_found",
+                           hint=f"neither {target.key} nor the controller sees {name!r}")
+
+    async def _relay_preconditions(self, target: Target, entry: Source) -> None:
+        line = await self.journal.transport(target)
+        if not line or not line.startswith("NDI receive transport: base TCP"):
+            raise PreviewError(409, "relay_needs_vc", node=target.key,
+                               vc_version=await self.journal.version(target), transport=line,
+                               hint="this node's videocomposer cannot take a relayed source "
+                                    "(needs >= 0.1.2-8 with base-TCP NDI receive)")
+        if not entry.address:
+            raise PreviewError(409, "relay_needs_controller_vc",
+                               hint="the controller's videocomposer reports no source address "
+                                    "(needs >= 0.1.2-8)")
+
+    async def _open_relay(self, target: Target, entry: Source) -> Relay:
+        listen_ip = await self._route_src(target.address)
+        if not listen_ip:
+            raise PreviewError(503, "relay_no_route", node=target.key, address=target.address)
+        relay = Relay(target.address, entry.address, listen_ip, should_close=self._relay_should_close)
+        try:
+            await relay.start()
+        except RelayError as e:
+            raise PreviewError(502 if e.reason == "relay_upstream_unreachable" else 503,
+                               e.reason, detail=e.detail)
+        self._relays[target.address] = relay
+        return relay
+
+    async def _close_relay(self, address: str, reason: str) -> None:
+        relay = self._relays.pop(address, None)
+        if relay is not None:
+            await relay.close(reason)
+
+    def _relay_should_close(self) -> str | None:
+        eng = self.bridge.engine
+        if eng.running == "yes":
+            return "project running"
+        if eng.load not in ("", UNKNOWN):
+            return "project loaded"
+        return None
 
     # ---------------- HTTP ----------------
 
@@ -774,11 +914,11 @@ class NdiPreview:
         except ValueError:
             return self.bridge._err("bad_timeout", 400)
         body = {"ok": True, **target.public(), "list": target.key,
-                "sources": [{"n": i + 1, "name": s.name, "addr": s.address}
+                "sources": [{"n": i + 1, "name": s.name, "addr": s.address, "via": s.via}
                             for i, s in enumerate(found)]}
         if not found:
-            body["hint"] = ("no NDI source seen from this VC: put the laptop on the nodes' "
-                            "switch (adapter on DHCP/automatic, or 169.254.0.0/16 on-link)")
+            body["hint"] = ("no NDI source seen from this VC or the controller: put the laptop "
+                            "on the nodes' switch, the controller's network or its WiFi")
         return web.json_response(body)
 
     async def h_outputs(self, request: web.Request) -> web.Response:
@@ -820,9 +960,12 @@ class NdiPreview:
         return web.json_response({"ok": True, "stopped": stopped})
 
     async def h_status(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, **(await self.status())})
+        authorized = self.bridge._check_token(request)
+        return web.json_response({"ok": True, **(await self.status(authorized))})
 
     async def close(self) -> None:
+        for address in list(self._relays):
+            await self._close_relay(address, "bridge stop")
         for t in list(self._tasks):
             t.cancel()
         for t in list(self._tasks):

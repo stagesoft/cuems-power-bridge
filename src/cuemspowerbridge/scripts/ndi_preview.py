@@ -13,8 +13,10 @@ Companion button calls). Refused while a project is loaded or running.
     cuems-ndi-preview stop [--node node01 | --all]
     cuems-ndi-preview status
 
-The laptop must be cabled into the nodes' switch (adapter on DHCP/automatic,
-or 169.254.0.0/16 on-link); unplug it before the show.
+The laptop can be on the nodes' switch (direct), or anywhere the controller
+reaches -- the venue LAN or the controller's WiFi: a node then gets the source
+through the controller's relay (no re-encoding; needs videocomposer >= 0.1.2-8
+with base-TCP NDI receive). Unplug it before the show.
 """
 
 from __future__ import annotations
@@ -77,7 +79,8 @@ def _print(status: int, body: dict, cmd: str) -> int:
     if cmd == "sources":
         print(f"NDI sources seen by {_where(body)}:")
         for s in body.get("sources", []):
-            print(f"  #{s['n']}  {s['name']}" + (f"   ({s['addr']})" if s.get("addr") else ""))
+            via = "   [via controller: relayed]" if s.get("via") == "controller" else ""
+            print(f"  #{s['n']}  {s['name']}" + (f"   ({s['addr']})" if s.get("addr") else "") + via)
         if body.get("hint"):
             print(f"  (none) {body['hint']}")
         print(f"('#n' indexes this list — {body.get('list')})")
@@ -88,6 +91,9 @@ def _print(status: int, body: dict, cmd: str) -> int:
     elif cmd == "show":
         line = f"{body.get('source')} → {_where(body)} output={body.get('output') or '(first)'}"
         print(f"{line}: {body.get('confirm')}" + (f" ({body['reason']})" if body.get("reason") else ""))
+        if body.get("via") == "relay":
+            rl = body.get("relay") or {}
+            print(f"  via the controller's relay {rl.get('listen')} -> {rl.get('upstream', '?')}")
         if body.get("fit"):
             f = body["fit"]
             print(f"  placed on {f['output']} ({f['mode']}), scale {f['scale']:g}, {f['basis']}")

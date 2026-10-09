@@ -263,6 +263,10 @@ class _FakeJournal:
         self.script: list[str] = []
         self.loaded = False
         self.unreadable = False
+        self.transport_line = "NDI receive transport: base TCP (/usr/share/cuems-videocomposer/ndi)"
+
+    async def transport(self, target):
+        return self.transport_line
 
     def check_readable(self, target):
         if self.unreadable:
@@ -299,6 +303,9 @@ def _arm(pv, sent, lines):
 
 async def test_show_sends_the_sequence_and_confirms(tmp_path):
     pv, sent = _preview(tmp_path, resolve={"node01.local": "169.254.13.233"})
+    # The node itself lists the source: direct, no discovery, no relay.
+    import time as _t
+    pv._sources_cache["169.254.13.233"] = (_t.monotonic(), [Source(SRC, "169.254.7.9:5961")])
     _arm(pv, sent, _loaded())
     r = await pv.show(SRC, "node01", "HDMI-A-1", wait=True)
     assert r["confirm"] == "frames" and r["fit"]["output"] == "HDMI-A-1"
@@ -442,3 +449,201 @@ def test_journal_unreadable_names_the_file(tmp_path):
     with pytest.raises(PreviewError) as e:
         j.check_readable(Target("node01", "x", "y", journal_ip="169.254.13.233"))
     assert e.value.reason == "journal_unreadable" and e.value.extra["path"] == str(f)
+
+
+# --------------------------------------------------------------------------
+# rev 9: relay through the controller
+# --------------------------------------------------------------------------
+
+import socket as _socket
+import time as _time
+
+from cuemspowerbridge.ndi_relay import Relay, RelayError
+
+
+async def _stream_server(payload: bytes = b"x" * 65536):
+    """A fake NDI sender: sends `payload` repeatedly to whoever connects."""
+    async def handle(r, w):
+        try:
+            for _ in range(20):
+                w.write(payload)
+                await w.drain()
+                await asyncio.sleep(0.01)
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            w.close()
+    srv = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return srv, srv.sockets[0].getsockname()[1]
+
+
+def _closed_port() -> int:
+    s = _socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    return port
+
+
+async def test_relay_copies_bytes_for_the_node_only():
+    srv, port = await _stream_server()
+    relay = Relay("127.0.0.1", f"127.0.0.1:{port}", "127.0.0.1")
+    await relay.start()
+    r, w = await asyncio.open_connection("127.0.0.1", relay.port)
+    got = 0
+    while got < 65536 * 5:
+        chunk = await r.read(1 << 20)
+        if not chunk:
+            break
+        got += len(chunk)
+    w.close()
+    assert got >= 65536 * 5 and relay.bytes_to_node >= got and relay.connections == 1
+    await relay.close("test")
+    assert relay.state == "closed"
+    srv.close()
+
+
+async def test_relay_refuses_a_peer_that_is_not_the_node():
+    srv, port = await _stream_server()
+    relay = Relay("169.254.0.11", f"127.0.0.1:{port}", "127.0.0.1")  # node is elsewhere
+    await relay.start()
+    r, w = await asyncio.open_connection("127.0.0.1", relay.port)
+    assert await r.read(10) == b""          # closed at accept
+    assert relay.refused == 1 and relay.connections == 0
+    await relay.close("test"); srv.close()
+
+
+async def test_relay_checks_the_upstream_before_listening():
+    relay = Relay("127.0.0.1", f"127.0.0.1:{_closed_port()}", "127.0.0.1")
+    with pytest.raises(RelayError) as e:
+        await relay.start()
+    assert e.value.reason == "relay_upstream_unreachable" and relay.port is None
+
+
+async def test_relay_connection_cap():
+    srv, port = await _stream_server(b"y" * 1024)
+    relay = Relay("127.0.0.1", f"127.0.0.1:{port}", "127.0.0.1", max_connections=1)
+    await relay.start()
+    r1, w1 = await asyncio.open_connection("127.0.0.1", relay.port)
+    await r1.read(10)
+    r2, w2 = await asyncio.open_connection("127.0.0.1", relay.port)
+    assert await r2.read(10) == b"" and relay.refused == 1
+    w1.close(); await relay.close("test"); srv.close()
+
+
+async def test_relay_watchdog_closes_on_project_and_on_idle(monkeypatch):
+    from cuemspowerbridge import ndi_relay
+    monkeypatch.setattr(ndi_relay, "WATCHDOG_TICK_S", 0.02)
+    srv, port = await _stream_server()
+    loaded = {"why": None}
+    relay = Relay("127.0.0.1", f"127.0.0.1:{port}", "127.0.0.1", should_close=lambda: loaded["why"])
+    await relay.start()
+    loaded["why"] = "project loaded"
+    for _ in range(50):
+        if relay.state == "closed":
+            break
+        await asyncio.sleep(0.02)
+    assert relay.state == "closed" and relay.close_reason == "project loaded"
+    idle = Relay("127.0.0.1", f"127.0.0.1:{port}", "127.0.0.1", idle_close_s=0.05)
+    await idle.start()
+    for _ in range(50):
+        if idle.state == "closed":
+            break
+        await asyncio.sleep(0.02)
+    assert idle.close_reason == "idle"
+    srv.close()
+
+
+def _seed(pv, address, sources):
+    pv._sources_cache[address] = (_time.monotonic(), sources)
+
+
+async def test_sources_for_a_node_merge_the_controller_only_ones(tmp_path):
+    pv, _ = _preview(tmp_path, resolve={"node01.local": "169.254.13.233"})
+    _seed(pv, "169.254.13.233", [Source("NODE CAM (x)", "169.254.7.9:5961")])
+    _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", "10.16.10.11:5961"),
+                            Source("NODE CAM (x)", "169.254.7.9:5961")])
+    _, merged = await pv.sources("node01")
+    assert [(s.name, s.via) for s in merged] == [("NODE CAM (x)", "direct"),
+                                                 ("AEON-NODE (CUEMS-TEST)", "controller")]
+
+
+async def test_show_relays_a_controller_only_source(tmp_path):
+    srv, port = await _stream_server()
+    pv, sent = _preview(tmp_path, resolve={"node01.local": "127.0.0.1"},
+                        routes={"127.0.0.1": "ethernet1"})
+    # Loopback stands in for the cluster: the node "is" 127.0.0.1.
+    node = Target("node01", "127.0.0.1", "test", "ethernet1", "127.0.0.1", ["node01"])
+
+    async def resolve(n):
+        return node if n == "node01" else Target("local", "127.0.0.1", "loopback")
+    pv.resolve_target = resolve
+    pv._route_src = lambda a: asyncio.sleep(0, result="127.0.0.1")
+    calls = []
+
+    async def fake_list(t, timeout=3):
+        calls.append(t.key)
+        return [] if t.key != "local" else [Source("AEON-NODE (CUEMS-TEST)", f"127.0.0.1:{port}")]
+    pv._list = fake_list
+    loaded_line = []
+
+    def send(a, p, path, args):
+        sent.append((a, path, args))
+        if path.endswith("/layer/load"):
+            loaded_line.append(args[0])
+            pv.journal.loaded = True
+            pv.journal.script = [f"NDI: Connected to source: {args[0][6:]}",
+                                 "NDI: Source format: 1920x1080 @ 25 fps (BGRA)",
+                                 f"Async load complete: {args[0]} (cue ID: ndi-preview)"]
+            # The node's VC connects through the relay.
+            relay = pv._relays["127.0.0.1"]
+            asyncio.get_running_loop().create_task(_drain(relay.port))
+    pv._osc_send = send
+    r = await pv.show("#1", "node01", "HDMI-A-1", wait=True)
+    assert r["via"] == "relay" and r["confirm"] == "frames", r
+    assert loaded_line[0].startswith("ndi://@127.0.0.1:")
+    assert r["relay"]["bytes_to_node"] > 0
+    # Unload goes before the load; stop closes the relay.
+    paths = [p for _, p, _ in sent]
+    assert paths.index("/videocomposer/layer/unload") < paths.index("/videocomposer/layer/load")
+    await pv.stop("node01")
+    assert "127.0.0.1" not in pv._relays
+    st = await pv.status(authorized=False)
+    assert "upstream" not in (st["last"]["relay"])
+    srv.close()
+
+
+async def _drain(port):
+    r, w = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        while await r.read(1 << 20):
+            pass
+    except (ConnectionError, OSError):
+        pass
+
+
+async def test_show_relay_refusals(tmp_path):
+    pv, sent = _preview(tmp_path, resolve={"node01.local": "169.254.13.233"})
+    _seed(pv, "169.254.13.233", [])
+    _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", "10.16.10.11:5961")])
+    pv.journal.transport_line = None                       # VC without the capability line
+    with pytest.raises(PreviewError) as e:
+        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+    assert (e.value.status, e.value.reason) == (409, "relay_needs_vc") and sent == []
+    pv.journal.transport_line = "NDI receive transport: NOT base TCP (NDI_CONFIG_DIR=/x) - relay unavailable"
+    with pytest.raises(PreviewError) as e:
+        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+    assert e.value.reason == "relay_needs_vc"
+    pv.journal.transport_line = "NDI receive transport: base TCP (/usr/share/cuems-videocomposer/ndi)"
+    _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", "")])  # legacy controller discovery
+    with pytest.raises(PreviewError) as e:
+        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+    assert (e.value.status, e.value.reason) == (409, "relay_needs_controller_vc") and sent == []
+    _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", f"127.0.0.1:{_closed_port()}")])
+    pv._route_src = lambda a: asyncio.sleep(0, result="127.0.0.1")
+    with pytest.raises(PreviewError) as e:
+        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+    assert (e.value.status, e.value.reason) == (502, "relay_upstream_unreachable")
+    assert [p for _, p, _ in sent] == ["/videocomposer/layer/unload"]  # no load was sent
+    assert not pv._relays
+    with pytest.raises(PreviewError) as e:
+        await pv.show("NOBODY (x)", "node01", None)
+    assert (e.value.status, e.value.reason) == (404, "source_not_found")
+
