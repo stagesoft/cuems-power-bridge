@@ -404,28 +404,46 @@ class Journal:
         entries = await self._runner([*args, *pos, f"SYSLOG_IDENTIFIER={VC_IDENTIFIER}"])
         return [_message(e) for e in entries]
 
-    async def transport(self, target: Target) -> str | None:
-        """The VC's latest "NDI receive transport: ..." line (any boot), or
-        None (a VC older than rev 9 never logs one)."""
+    async def _latest(self, target: Target, pattern: str) -> tuple[int, str] | None:
+        """(realtime µs, message) of the VC's latest line matching pattern."""
         args, _ = self._source_args(target)
         try:
             entries = await self._runner(
-                [*args, "-r", "-n", "1", "--grep", "^NDI receive transport: ",
-                 f"SYSLOG_IDENTIFIER={VC_IDENTIFIER}"])
+                [*args, "-r", "-n", "1", "--grep", pattern, f"SYSLOG_IDENTIFIER={VC_IDENTIFIER}"])
         except Exception:
             return None
-        msgs = [_message(e) for e in entries]
-        return msgs[0] if msgs else None
+        if not entries:
+            return None
+        e = entries[0]
+        try:
+            ts = int(e.get("__REALTIME_TIMESTAMP", 0))
+        except (TypeError, ValueError):
+            ts = 0
+        return ts, _message(e)
+
+    async def _current(self, target: Target, pattern: str) -> str | None:
+        """The latest line matching pattern, but only if the RUNNING VC
+        process logged it. A VC older than rev 9 logs neither the version
+        nor the transport line, so after a downgrade the newest such line in
+        the journal belongs to a previous binary. Every VC logs "Worker
+        thread running" right after starting: a line more than 60 s older
+        than the newest of those is stale."""
+        line = await self._latest(target, pattern)
+        if line is None:
+            return None
+        worker = await self._latest(target, "^AsyncVideoLoader: Worker thread running$")
+        if worker is not None and line[0] and worker[0] and line[0] < worker[0] - 60_000_000:
+            return None
+        return line[1]
+
+    async def transport(self, target: Target) -> str | None:
+        """The running VC's "NDI receive transport: ..." line, or None (a VC
+        older than rev 9 never logs one)."""
+        return await self._current(target, "^NDI receive transport: ")
 
     async def version(self, target: Target) -> str | None:
-        args, _ = self._source_args(target)
-        try:
-            entries = await self._runner(
-                [*args, "-r", "-n", "1", "--grep", "^cuems-videocomposer .* starting$",
-                 f"SYSLOG_IDENTIFIER={VC_IDENTIFIER}"])
-        except Exception:
-            return None
-        return parse_version(_message(e) for e in entries)
+        line = await self._current(target, "^cuems-videocomposer .* starting$")
+        return parse_version([line]) if line else None
 
 
 # --------------------------------------------------------------------------

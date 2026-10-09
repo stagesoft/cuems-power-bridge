@@ -647,3 +647,25 @@ async def test_show_relay_refusals(tmp_path):
         await pv.show("NOBODY (x)", "node01", None)
     assert (e.value.status, e.value.reason) == (404, "source_not_found")
 
+
+async def test_version_and_transport_lines_must_belong_to_the_running_vc(tmp_path):
+    """After a downgrade the newest version/transport line is a previous
+    binary's: it must not count (seen on test node02, 2026-10-09)."""
+    lines = {
+        "^cuems-videocomposer .* starting$": (1_000_000_000, "cuems-videocomposer 0.1.2-8~test1 starting"),
+        "^NDI receive transport: ": (1_000_000_100, "NDI receive transport: base TCP (/x)"),
+        "^AsyncVideoLoader: Worker thread running$": (5_000_000_000, "AsyncVideoLoader: Worker thread running"),
+    }
+
+    async def runner(args):
+        pat = args[args.index("--grep") + 1]
+        ts, msg = lines[pat]
+        return [{"__REALTIME_TIMESTAMP": str(ts), "MESSAGE": msg}]
+
+    j = Journal(journal_dir=str(tmp_path), runner=runner)
+    t = Target("node02", "169.254.0.12", "x")
+    assert await j.version(t) is None and await j.transport(t) is None   # stale
+    lines["^AsyncVideoLoader: Worker thread running$"] = (1_000_500_000, "AsyncVideoLoader: Worker thread running")
+    assert await j.version(t) == "0.1.2-8~test1"
+    assert (await j.transport(t)).startswith("NDI receive transport: base TCP")
+
