@@ -2,21 +2,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 
-"""cuems-ndi-preview: put an NDI source on a node's output during a montaje.
+"""cuems-ndi-preview: put an NDI source on any screen of the cluster during a montaje.
 
 A thin client of the power-bridge's /ndi/* endpoints (the same ones a
 Companion button calls). Refused while a project is loaded or running.
 
-    cuems-ndi-preview sources [--node node01] [--timeout 3]
-    cuems-ndi-preview outputs [--node node01]
-    cuems-ndi-preview show '#1' --node node01 --output HDMI-A-1 [--native] [--wait]
-    cuems-ndi-preview stop [--node node01 | --all]
-    cuems-ndi-preview status
+    cuems-ndi-preview sources                       every source any machine sees
+    cuems-ndi-preview outputs                       every screen of the cluster
+    cuems-ndi-preview show <source|#n> <screen> [--native] [--wait]
+    cuems-ndi-preview stop [<screen>]               no screen = all
+    cuems-ndi-preview status                        what is on each screen
 
-The laptop can be on the nodes' switch (direct), or anywhere the controller
-reaches -- the venue LAN or the controller's WiFi: a node then gets the source
-through the controller's relay (no re-encoding; needs videocomposer >= 0.1.2-8
-with base-TCP NDI receive). Unplug it before the show.
+A screen is its UI name ("Monitor derecha"), <machine>_<connector>
+("node01_HDMI-A-1") or its number in `outputs`. Which machine drives it, and
+whether the source reaches it directly or through the controller's relay, is
+worked out by the tool. Unplug the laptop before the show.
 """
 
 from __future__ import annotations
@@ -62,11 +62,9 @@ def _call(base: str, token: str, method: str, path: str, query: dict | None = No
         return 0, {"ok": False, "reason": f"bridge unreachable at {base}: {e.reason}"}
 
 
-def _where(r: dict) -> str:
-    node = r.get("node") or "controller (local VC)"
-    via = r.get("resolved") or ""
-    iface = f" on {r['iface']}" if r.get("iface") else ""
-    return f"{node} at {r.get('address', '?')} ({via}{iface})"
+def _screen(sc: dict) -> str:
+    name = f"{sc['name']}  " if sc.get("name") else ""
+    return f"{name}({sc['alias']})"
 
 
 def _print(status: int, body: dict, cmd: str) -> int:
@@ -77,31 +75,37 @@ def _print(status: int, body: dict, cmd: str) -> int:
               file=sys.stderr)
         return 1
     if cmd == "sources":
-        print(f"NDI sources seen by {_where(body)}:")
-        for s in body.get("sources", []):
-            via = "   [via controller: relayed]" if s.get("via") == "controller" else ""
-            print(f"  #{s['n']}  {s['name']}" + (f"   ({s['addr']})" if s.get("addr") else "") + via)
+        for src in body.get("sources", []):
+            print(f"  #{src['n']}  {src['name']}   [seen by: {', '.join(src['seen_by'])}]")
         if body.get("hint"):
             print(f"  (none) {body['hint']}")
-        print(f"('#n' indexes this list — {body.get('list')})")
     elif cmd == "outputs":
-        print(f"outputs of {_where(body)}:")
-        for o in body.get("outputs", []):
-            print(f"  {o['name']:<10} {o.get('mode', ''):<16} canvas {o['region']}")
+        for sc in body.get("outputs", []):
+            flag = "" if sc.get("present") in (None, True) else "   (not driven now)"
+            print(f"  {sc['n']:>2}  {sc.get('name') or '-':<22} {sc['alias']}{flag}")
     elif cmd == "show":
-        line = f"{body.get('source')} → {_where(body)} output={body.get('output') or '(first)'}"
-        print(f"{line}: {body.get('confirm')}" + (f" ({body['reason']})" if body.get("reason") else ""))
-        if body.get("via") == "relay":
-            rl = body.get("relay") or {}
-            print(f"  via the controller's relay {rl.get('listen')} -> {rl.get('upstream', '?')}")
+        line = f"{body.get('source')} -> {_screen(body['screen'])}: {body.get('confirm')}"
+        print(line + (f" ({body['reason']})" if body.get("reason") else ""))
+        if body.get("route") == "relay":
+            print("  (through the controller: this machine does not see the source itself)")
         if body.get("fit"):
             f = body["fit"]
-            print(f"  placed on {f['output']} ({f['mode']}), scale {f['scale']:g}, {f['basis']}")
+            print(f"  {f['mode']}, scale {f['scale']:g}, {f['basis']}")
         if body.get("confirm") == "pending":
             print("  check with: cuems-ndi-preview status")
     elif cmd == "stop":
-        for t in body.get("stopped", []):
-            print(f"stop sent to {_where(t)}")
+        print("stopped: " + ", ".join(_screen(sc) for sc in body.get("stopped", [])))
+    elif cmd == "status":
+        eng = body.get("engine", {})
+        print(f"engine: load={eng.get('load')!r} running={eng.get('running')!r}")
+        previews = body.get("previews", [])
+        if not previews:
+            print("no preview on any screen")
+        for p in previews:
+            state = p["confirm"] + (" WIPED (project loaded)" if p.get("wiped") else "") + \
+                (" stopped" if p.get("stopped") else "")
+            print(f"  {_screen(p['screen'])}: {p['source']} [{state}]"
+                  + (" via controller" if p.get("route") == "relay" else ""))
     else:
         print(json.dumps(body, indent=2))
     return 0
@@ -122,22 +126,17 @@ def main(argv: list[str] | None = None) -> int:
     def add(name: str, **kw) -> argparse.ArgumentParser:
         return sub.add_parser(name, parents=[common], **kw)
 
-    s = add("sources", help="list the NDI sources a VC sees")
-    s.add_argument("--node")
-    s.add_argument("--timeout", type=int, default=3)
-    s = add("outputs", help="list a VC's outputs")
-    s.add_argument("--node")
-    s = add("show", help="show a source ('#n', exact name or substring)")
+    add("sources", help="every NDI source any machine of the cluster sees")
+    add("outputs", help="every screen of the cluster")
+    s = add("show", help="show a source ('#n', exact name or substring) on a screen")
     s.add_argument("source")
-    s.add_argument("--node")
-    s.add_argument("--output")
+    s.add_argument("screen", help='UI name ("Monitor derecha"), machine_connector, or number')
     s.add_argument("--native", action="store_true", help="native pixel size instead of filling")
     s.add_argument("--wait", action="store_true", help="wait for the VC's confirmation (<=15 s)")
     s.add_argument("--force-unknown-engine", action="store_true",
                    help="only when the controller engine cannot be reached")
-    s = add("stop", help="remove the preview")
-    s.add_argument("--node")
-    s.add_argument("--all", action="store_true")
+    s = add("stop", help="remove the preview from one screen, or from all")
+    s.add_argument("screen", nargs="?")
     add("status")
     a = p.parse_args(argv)
 
@@ -146,17 +145,17 @@ def main(argv: list[str] | None = None) -> int:
     token = a.token or os.environ.get("CUEMS_NDI_TOKEN") or conf_token
 
     if a.cmd == "sources":
-        st, body = _call(url, token, "GET", "/ndi/sources",
-                         {"node": a.node, "timeout": a.timeout}, timeout=a.timeout + 20)
+        st, body = _call(url, token, "GET", "/ndi/sources", timeout=30)
     elif a.cmd == "outputs":
-        st, body = _call(url, token, "GET", "/ndi/outputs", {"node": a.node})
+        st, body = _call(url, token, "GET", "/ndi/outputs", timeout=30)
     elif a.cmd == "show":
         st, body = _call(url, token, "POST", "/ndi/preview", body={
-            "source": a.source, "node": a.node, "output": a.output,
+            "source": a.source, "output": a.screen,
             "mode": "native" if a.native else "fill", "wait": a.wait,
             "force_unknown_engine": a.force_unknown_engine}, timeout=60)
     elif a.cmd == "stop":
-        st, body = _call(url, token, "POST", "/ndi/stop", body={"node": a.node, "all": a.all})
+        st, body = _call(url, token, "POST", "/ndi/stop",
+                         body={"output": a.screen} if a.screen else {})
     else:
         st, body = _call(url, token, "GET", "/ndi/status")
     if a.json:

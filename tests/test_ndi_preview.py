@@ -12,6 +12,7 @@ either side, both must change.
 import asyncio
 import os
 import textwrap
+import time as _time
 
 import pytest
 
@@ -85,12 +86,12 @@ def test_parse_version_latest_wins():
 # classify
 # --------------------------------------------------------------------------
 
-def _loaded(source=SRC, fmt=True):
+def _loaded(source=SRC, fmt=True, layer="ndi-preview"):
     lines = [f"NDI: Connected to source: {source}"]
     lines.append("NDI: Source format: 1920x1080 @ 25 fps (BGRA)" if fmt
                  else "NDI: No video frame received, using defaults (1920x1080 @25fps)")
-    lines += [f"Async load complete: ndi://{source} (cue ID: ndi-preview)",
-              "fit_output: ndi-preview -> HDMI-A-1 fill pos -2880,0 scale 1,1 (dims 1920x1080)"]
+    lines += [f"Async load complete: ndi://{source} (cue ID: {layer})",
+              f"fit_output: {layer} -> HDMI-A-1 fill pos -2880,0 scale 1,1 (dims 1920x1080)"]
     return lines
 
 
@@ -198,11 +199,33 @@ NETMAP = textwrap.dedent("""\
 """)
 
 
+MAPPINGS = textwrap.dedent("""\
+    <CuemsProjectMappings>
+      <nodes>
+        <node><uuid>c-1</uuid><video><outputs>
+          <output><id>0</id><name>Monitor izquierda</name><mappings><mapped_to>HDMI-A-1</mapped_to></mappings></output>
+          <output><id>1</id><name>Emulador EDID A2</name><mappings><mapped_to>HDMI-A-2</mapped_to></mappings></output>
+        </outputs></video></node>
+        <node><uuid>n-1</uuid><video><outputs>
+          <output><id>0</id><name>Monitor derecha</name><mappings><mapped_to>HDMI-A-1</mapped_to></mappings></output>
+          <output><id>1</id><name>Emulador EDID A2</name><mappings><mapped_to>HDMI-A-2</mapped_to></mappings></output>
+        </outputs></video></node>
+        <node><uuid>n-2</uuid><video><outputs>
+          <output><id>0</id><name>Emulador EDID A1</name><mappings><mapped_to>HDMI-A-1</mapped_to></mappings></output>
+        </outputs></video></node>
+      </nodes>
+    </CuemsProjectMappings>
+""")
+
+
 def _preview(tmp_path, *, resolve=None, routes=None, engine=None, auto=False):
     cfg = Config()
     p = tmp_path / "network_map.xml"
     p.write_text(NETMAP)
     cfg.network_map_path = str(p)
+    m = tmp_path / "default_mappings.xml"
+    m.write_text(MAPPINGS)
+    cfg.extras["ndi_mappings_path"] = str(m)
     bridge = Bridge(cfg)
     bridge.engine = engine or _Engine()
     bridge.auto_load_active = lambda: auto
@@ -301,37 +324,83 @@ def _arm(pv, sent, lines):
     pv.journal.script = lines
 
 
-async def test_show_sends_the_sequence_and_confirms(tmp_path):
-    pv, sent = _preview(tmp_path, resolve={"node01.local": "169.254.13.233"})
-    # The node itself lists the source: direct, no discovery, no relay.
-    import time as _t
-    pv._sources_cache["169.254.13.233"] = (_t.monotonic(), [Source(SRC, "169.254.7.9:5961")])
-    _arm(pv, sent, _loaded())
-    r = await pv.show(SRC, "node01", "HDMI-A-1", wait=True)
-    assert r["confirm"] == "frames" and r["fit"]["output"] == "HDMI-A-1"
+NODE01 = "169.254.13.233"
+
+
+def _seed(pv, address, sources):
+    pv._sources_cache[address] = (_time.monotonic(), sources)
+
+
+async def test_show_by_ui_name_sends_the_sequence_and_confirms(tmp_path):
+    pv, sent = _preview(tmp_path, resolve={"node01.local": NODE01})
+    _seed(pv, NODE01, [Source(SRC, "169.254.7.9:5961")])   # node01 sees it: direct
+    _arm(pv, sent, _loaded(layer="ndi-preview-HDMI-A-1"))
+    r = await pv.show(SRC, "Monitor derecha", wait=True)
+    assert r["confirm"] == "frames" and r["route"] == "direct"
+    assert r["screen"]["alias"] == "node01_HDMI-A-1"
     assert [p for _, p, _ in sent] == [
         "/videocomposer/layer/unload", "/videocomposer/layer/load",
-        "/videocomposer/layer/ndi-preview/fit_output",
-        "/videocomposer/layer/ndi-preview/zorder", "/videocomposer/layer/ndi-preview/visible"]
-    assert sent[1] == ("169.254.13.233", "/videocomposer/layer/load", [f"ndi://{SRC}", "ndi-preview"])
+        "/videocomposer/layer/ndi-preview-HDMI-A-1/fit_output",
+        "/videocomposer/layer/ndi-preview-HDMI-A-1/zorder",
+        "/videocomposer/layer/ndi-preview-HDMI-A-1/visible"]
+    assert sent[1] == (NODE01, "/videocomposer/layer/load", [f"ndi://{SRC}", "ndi-preview-HDMI-A-1"])
     assert sent[2][2] == ["HDMI-A-1", "fill"]
-    assert not pv._lock(await pv.resolve_target("node01")).locked()
+
+
+async def test_show_by_alias_and_number(tmp_path):
+    pv, sent = _preview(tmp_path)
+    _seed(pv, "127.0.0.1", [Source(SRC, "169.254.7.9:5961")])
+    _arm(pv, sent, _loaded(layer="ndi-preview-HDMI-A-2"))
+    r = await pv.show(SRC, "controller_HDMI-A-2", wait=True)
+    assert r["screen"]["name"] == "Emulador EDID A2" and r["machine_address"] == "127.0.0.1"
+    sent.clear(); pv.journal.loaded = False
+    _arm(pv, sent, _loaded(layer="ndi-preview-HDMI-A-1"))
+    r = await pv.show(SRC, "1", wait=True)       # screen #1 = controller HDMI-A-1
+    assert r["screen"]["alias"] == "controller_HDMI-A-1"
+
+
+async def test_ambiguous_and_unknown_screens(tmp_path):
+    pv, sent = _preview(tmp_path)
+    with pytest.raises(PreviewError) as e:
+        await pv.show(SRC, "Emulador EDID A2")
+    assert e.value.reason == "ambiguous_output" and len(e.value.extra["candidates"]) == 2
+    with pytest.raises(PreviewError) as e:
+        await pv.show(SRC, "Monitor central")
+    assert (e.value.status, e.value.reason) == (404, "unknown_output") and sent == []
 
 
 async def test_show_without_wait_returns_pending_and_status_follows(tmp_path):
     pv, sent = _preview(tmp_path)
-    _arm(pv, sent, _loaded(fmt=False))
-    r = await pv.show(SRC, None, None, mode="native")
-    assert r["confirm"] == "pending" and r["address"] == "127.0.0.1"
-    assert sent[2][2] == ["native"]
+    _seed(pv, "127.0.0.1", [Source(SRC, "")])
+    _arm(pv, sent, _loaded(fmt=False, layer="ndi-preview-HDMI-A-1"))
+    r = await pv.show(SRC, "Monitor izquierda", mode="native")
+    assert r["confirm"] == "pending" and r["machine_address"] == "127.0.0.1"
+    assert sent[2][2] == ["HDMI-A-1", "native"]
     await asyncio.sleep(0.2)
     st = await pv.status()
-    assert st["last"]["confirm"] == "no_frames_yet"
+    assert st["previews"][0]["confirm"] == "no_frames_yet"
     assert st["vc_versions"] == {"127.0.0.1": "0.1.2-8"}
     pv.journal.script += ["NDI: Source format updated 1280x720 @ 50 fps (was invented)"]
-    assert (await pv.status())["last"]["confirm"] == "frames"
+    assert (await pv.status())["previews"][0]["confirm"] == "frames"
     pv.journal.script += ["Reset: removing all layers, cancelling loads, resetting master"]
-    assert (await pv.status())["last"]["wiped"] is True
+    assert (await pv.status())["previews"][0]["wiped"] is True
+
+
+async def test_two_screens_on_one_machine_keep_both_previews(tmp_path):
+    pv, sent = _preview(tmp_path)
+    _seed(pv, "127.0.0.1", [Source(SRC, "")])
+    _arm(pv, sent, _loaded(layer="ndi-preview-HDMI-A-1") + _loaded(layer="ndi-preview-HDMI-A-2"))
+    await pv.show(SRC, "Monitor izquierda", wait=True)
+    await pv.show(SRC, "controller_HDMI-A-2", wait=True)
+    st = await pv.status()
+    assert sorted(p["screen"]["alias"] for p in st["previews"]) == ["controller_HDMI-A-1",
+                                                                   "controller_HDMI-A-2"]
+    # The second show unloaded only its own layer.
+    unloads = [a[0] for _, p, a in sent if p.endswith("/layer/unload")]
+    assert unloads == ["ndi-preview-HDMI-A-1", "ndi-preview-HDMI-A-2"]
+    sent.clear()
+    await pv.stop("Monitor izquierda")
+    assert sent == [("127.0.0.1", "/videocomposer/layer/unload", ["ndi-preview-HDMI-A-1"])]
 
 
 async def test_show_refused_before_anything_is_sent(tmp_path):
@@ -341,31 +410,35 @@ async def test_show_refused_before_anything_is_sent(tmp_path):
                                  (_Engine(), True, "auto_load_active")):
         pv, sent = _preview(tmp_path, engine=engine, auto=auto)
         with pytest.raises(PreviewError) as e:
-            await pv.show(SRC, None, None)
+            await pv.show(SRC, "Monitor izquierda")
         assert e.value.reason == reason and sent == []
 
 
 async def test_show_busy_while_a_load_is_in_flight(tmp_path):
     pv, sent = _preview(tmp_path)
-    _arm(pv, sent, [])  # never terminal → the lock is held until the timeout
-    await pv.show(SRC, None, None)
+    _seed(pv, "127.0.0.1", [Source(SRC, ""), Source("OTHER (cam)", "")])
+    _arm(pv, sent, [])  # never terminal -> the machine's lock is held until the timeout
+    await pv.show(SRC, "Monitor izquierda")
     with pytest.raises(PreviewError) as e:
-        await pv.show("OTHER (cam)", None, None)
+        await pv.show("OTHER (cam)", "controller_HDMI-A-2")   # same machine
     assert (e.value.status, e.value.reason) == (409, "busy")
 
 
 async def test_show_unknown_output_unloads(tmp_path):
     pv, sent = _preview(tmp_path)
-    _arm(pv, sent, ["fit_output: unknown output 'DP-9' (have: HDMI-A-1)"] + _loaded())
+    _seed(pv, "127.0.0.1", [Source(SRC, "")])
+    _arm(pv, sent, ["fit_output: unknown output 'HDMI-A-2' (have: HDMI-A-1)"]
+         + _loaded(layer="ndi-preview-HDMI-A-2"))
     with pytest.raises(PreviewError) as e:
-        await pv.show(SRC, None, "DP-9", wait=True)
+        await pv.show(SRC, "controller_HDMI-A-2", wait=True)
     assert (e.value.status, e.value.reason) == (502, "unknown_output")
-    assert sent[-1][1:] == ("/videocomposer/layer/unload", ["ndi-preview"])
+    assert sent[-1][1:] == ("/videocomposer/layer/unload", ["ndi-preview-HDMI-A-2"])
 
 
 async def test_show_raced_by_load(tmp_path):
     eng = _Engine()
     pv, sent = _preview(tmp_path, engine=eng)
+    _seed(pv, "127.0.0.1", [Source(SRC, "")])
     _arm(pv, sent, [])
     orig = pv._osc_send
 
@@ -375,26 +448,26 @@ async def test_show_raced_by_load(tmp_path):
             eng.load = "show1"  # the operator loads a project right then
     pv._osc_send = send
     with pytest.raises(PreviewError) as e:
-        await pv.show(SRC, None, None, wait=True)
+        await pv.show(SRC, "Monitor izquierda", wait=True)
     assert e.value.reason == "raced_by_load"
-    assert ("127.0.0.1", "/videocomposer/layer/unload", ["ndi-preview"]) in sent[5:]
+    assert ("127.0.0.1", "/videocomposer/layer/unload", ["ndi-preview-HDMI-A-1"]) in sent[5:]
 
 
 async def test_show_journal_unreadable(tmp_path):
     pv, sent = _preview(tmp_path)
     pv.journal.unreadable = True
     with pytest.raises(PreviewError) as e:
-        await pv.show(SRC, None, None)
+        await pv.show(SRC, "Monitor izquierda")
     assert (e.value.status, e.value.reason) == (503, "journal_unreadable") and sent == []
 
 
-async def test_stop_all_dedups_by_address(tmp_path):
-    # node02's name answers with node01's address: one unload per VC.
-    pv, sent = _preview(tmp_path, resolve={"node01.local": "169.254.13.233",
-                                           "node02.local": "169.254.13.233"})
-    stopped = await pv.stop(all_=True)
-    assert sorted(t["address"] for t in stopped) == ["127.0.0.1", "169.254.13.233"]
-    assert len(sent) == 2
+async def test_stop_everything_covers_every_screen(tmp_path):
+    pv, sent = _preview(tmp_path, resolve={"node01.local": NODE01, "node02.local": "169.254.20.1"})
+    stopped = await pv.stop()
+    assert [s["alias"] for s in stopped] == ["controller_HDMI-A-1", "controller_HDMI-A-2",
+                                             "node01_HDMI-A-1", "node01_HDMI-A-2",
+                                             "node02_HDMI-A-1"]
+    assert (NODE01, "/videocomposer/layer/unload", ["ndi-preview-HDMI-A-2"]) in sent
 
 
 # --------------------------------------------------------------------------
@@ -456,7 +529,6 @@ def test_journal_unreadable_names_the_file(tmp_path):
 # --------------------------------------------------------------------------
 
 import socket as _socket
-import time as _time
 
 from cuemspowerbridge.ndi_relay import Relay, RelayError
 
@@ -551,62 +623,59 @@ async def test_relay_watchdog_closes_on_project_and_on_idle(monkeypatch):
     srv.close()
 
 
-def _seed(pv, address, sources):
-    pv._sources_cache[address] = (_time.monotonic(), sources)
-
-
-async def test_sources_for_a_node_merge_the_controller_only_ones(tmp_path):
-    pv, _ = _preview(tmp_path, resolve={"node01.local": "169.254.13.233"})
-    _seed(pv, "169.254.13.233", [Source("NODE CAM (x)", "169.254.7.9:5961")])
+async def test_sources_are_one_cluster_wide_list(tmp_path):
+    pv, _ = _preview(tmp_path, resolve={"node01.local": NODE01, "node02.local": "169.254.20.1"})
     _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", "10.16.10.11:5961"),
                             Source("NODE CAM (x)", "169.254.7.9:5961")])
-    _, merged = await pv.sources("node01")
-    assert [(s.name, s.via) for s in merged] == [("NODE CAM (x)", "direct"),
-                                                 ("AEON-NODE (CUEMS-TEST)", "controller")]
+    _seed(pv, NODE01, [Source("NODE CAM (x)", "169.254.7.9:5961")])
+    _seed(pv, "169.254.20.1", [])
+    listed = await pv.sources()
+    assert [(s.name, sorted(s.seen_by)) for s in listed] == [
+        ("AEON-NODE (CUEMS-TEST)", ["controller"]),
+        ("NODE CAM (x)", ["controller", "node01"])]
 
 
 async def test_show_relays_a_controller_only_source(tmp_path):
     srv, port = await _stream_server()
-    pv, sent = _preview(tmp_path, resolve={"node01.local": "127.0.0.1"},
-                        routes={"127.0.0.1": "ethernet1"})
-    # Loopback stands in for the cluster: the node "is" 127.0.0.1.
+    pv, sent = _preview(tmp_path)
+    # Loopback stands in for the cluster: node01 "is" 127.0.0.2's twin, 127.0.0.1.
     node = Target("node01", "127.0.0.1", "test", "ethernet1", "127.0.0.1", ["node01"])
 
     async def resolve(n):
         return node if n == "node01" else Target("local", "127.0.0.1", "loopback")
     pv.resolve_target = resolve
     pv._route_src = lambda a: asyncio.sleep(0, result="127.0.0.1")
-    calls = []
+
+    async def machines():
+        return ["local", "node01"]
+    pv._machines = machines
 
     async def fake_list(t, timeout=3):
-        calls.append(t.key)
-        return [] if t.key != "local" else [Source("AEON-NODE (CUEMS-TEST)", f"127.0.0.1:{port}")]
+        return [Source("AEON-NODE (CUEMS-TEST)", f"127.0.0.1:{port}")] if t.key == "local" else []
     pv._list = fake_list
-    loaded_line = []
+    loaded = []
 
     def send(a, p, path, args):
         sent.append((a, path, args))
         if path.endswith("/layer/load"):
-            loaded_line.append(args[0])
+            loaded.append(args[0])
             pv.journal.loaded = True
             pv.journal.script = [f"NDI: Connected to source: {args[0][6:]}",
                                  "NDI: Source format: 1920x1080 @ 25 fps (BGRA)",
-                                 f"Async load complete: {args[0]} (cue ID: ndi-preview)"]
-            # The node's VC connects through the relay.
-            relay = pv._relays["127.0.0.1"]
+                                 f"Async load complete: {args[0]} (cue ID: {args[1]})"]
+            relay = pv._relays["127.0.0.1|HDMI-A-1"]
             asyncio.get_running_loop().create_task(_drain(relay.port))
     pv._osc_send = send
-    r = await pv.show("#1", "node01", "HDMI-A-1", wait=True)
-    assert r["via"] == "relay" and r["confirm"] == "frames", r
-    assert loaded_line[0].startswith("ndi://@127.0.0.1:")
+    r = await pv.show("#1", "Monitor derecha", wait=True)
+    assert r["route"] == "relay" and r["confirm"] == "frames", r
+    assert loaded[0].startswith("ndi://@127.0.0.1:")
     assert r["relay"]["bytes_to_node"] > 0
-    # Unload goes before the load; stop closes the relay.
     paths = [p for _, p, _ in sent]
     assert paths.index("/videocomposer/layer/unload") < paths.index("/videocomposer/layer/load")
-    await pv.stop("node01")
-    assert "127.0.0.1" not in pv._relays
     st = await pv.status(authorized=False)
-    assert "upstream" not in (st["last"]["relay"])
+    assert "upstream" not in st["previews"][0]["relay"]
+    await pv.stop("node01_HDMI-A-1")
+    assert not pv._relays
     srv.close()
 
 
@@ -620,31 +689,32 @@ async def _drain(port):
 
 
 async def test_show_relay_refusals(tmp_path):
-    pv, sent = _preview(tmp_path, resolve={"node01.local": "169.254.13.233"})
-    _seed(pv, "169.254.13.233", [])
+    pv, sent = _preview(tmp_path, resolve={"node01.local": NODE01, "node02.local": "169.254.20.1"})
+    _seed(pv, NODE01, [])
+    _seed(pv, "169.254.20.1", [])
     _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", "10.16.10.11:5961")])
     pv.journal.transport_line = None                       # VC without the capability line
     with pytest.raises(PreviewError) as e:
-        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+        await pv.show("AEON-NODE (CUEMS-TEST)", "Monitor derecha")
     assert (e.value.status, e.value.reason) == (409, "relay_needs_vc") and sent == []
     pv.journal.transport_line = "NDI receive transport: NOT base TCP (NDI_CONFIG_DIR=/x) - relay unavailable"
     with pytest.raises(PreviewError) as e:
-        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+        await pv.show("AEON-NODE (CUEMS-TEST)", "Monitor derecha")
     assert e.value.reason == "relay_needs_vc"
     pv.journal.transport_line = "NDI receive transport: base TCP (/usr/share/cuems-videocomposer/ndi)"
     _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", "")])  # legacy controller discovery
     with pytest.raises(PreviewError) as e:
-        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+        await pv.show("AEON-NODE (CUEMS-TEST)", "Monitor derecha")
     assert (e.value.status, e.value.reason) == (409, "relay_needs_controller_vc") and sent == []
     _seed(pv, "127.0.0.1", [Source("AEON-NODE (CUEMS-TEST)", f"127.0.0.1:{_closed_port()}")])
     pv._route_src = lambda a: asyncio.sleep(0, result="127.0.0.1")
     with pytest.raises(PreviewError) as e:
-        await pv.show("AEON-NODE (CUEMS-TEST)", "node01", None)
+        await pv.show("AEON-NODE (CUEMS-TEST)", "Monitor derecha")
     assert (e.value.status, e.value.reason) == (502, "relay_upstream_unreachable")
     assert [p for _, p, _ in sent] == ["/videocomposer/layer/unload"]  # no load was sent
     assert not pv._relays
     with pytest.raises(PreviewError) as e:
-        await pv.show("NOBODY (x)", "node01", None)
+        await pv.show("NOBODY (x)", "Monitor derecha")
     assert (e.value.status, e.value.reason) == (404, "source_not_found")
 
 
@@ -669,3 +739,52 @@ async def test_version_and_transport_lines_must_belong_to_the_running_vc(tmp_pat
     assert await j.version(t) == "0.1.2-8~test1"
     assert (await j.transport(t)).startswith("NDI receive transport: base TCP")
 
+
+
+# --------------------------------------------------------------------------
+# rev 10: screen catalogue
+# --------------------------------------------------------------------------
+
+from cuemspowerbridge import ndi_screens
+
+
+def test_catalogue_names_and_aliases(tmp_path):
+    (tmp_path / "nm.xml").write_text(NETMAP)
+    (tmp_path / "dm.xml").write_text(MAPPINGS)
+    screens = ndi_screens.catalogue(str(tmp_path / "dm.xml"), str(tmp_path / "nm.xml"))
+    assert [(s.n, s.alias, s.name, s.target) for s in screens] == [
+        (1, "controller_HDMI-A-1", "Monitor izquierda", "local"),
+        (2, "controller_HDMI-A-2", "Emulador EDID A2", "local"),
+        (3, "node01_HDMI-A-1", "Monitor derecha", "node01"),
+        (4, "node01_HDMI-A-2", "Emulador EDID A2", "node01"),
+        (5, "node02_HDMI-A-1", "Emulador EDID A1", "node02")]
+    assert screens[0].layer_id == "ndi-preview-HDMI-A-1"
+
+
+def test_catalogue_live_marks_absent_and_adds_unmapped(tmp_path):
+    (tmp_path / "nm.xml").write_text(NETMAP)
+    (tmp_path / "dm.xml").write_text(MAPPINGS)
+    screens = ndi_screens.catalogue(str(tmp_path / "dm.xml"), str(tmp_path / "nm.xml"),
+                                    live={"local": ["HDMI-A-1", "HDMI-A-3"]})
+    ctrl = [(s.alias, s.name, s.present) for s in screens if s.target == "local"]
+    assert ctrl == [("controller_HDMI-A-1", "Monitor izquierda", True),
+                    ("controller_HDMI-A-2", "Emulador EDID A2", False),
+                    ("controller_HDMI-A-3", "", True)]
+
+
+def test_resolve_screen_order(tmp_path):
+    (tmp_path / "nm.xml").write_text(NETMAP)
+    (tmp_path / "dm.xml").write_text(MAPPINGS)
+    sc = ndi_screens.catalogue(str(tmp_path / "dm.xml"), str(tmp_path / "nm.xml"))
+    r = ndi_screens.resolve
+    assert r("3", sc).alias == "node01_HDMI-A-1"
+    assert r("#3", sc).alias == "node01_HDMI-A-1"
+    assert r("NODE01_hdmi-a-1", sc).name == "Monitor derecha"        # alias, any case
+    assert r("monitor derecha", sc).alias == "node01_HDMI-A-1"       # unique UI name
+    assert r("node01 Emulador EDID A2", sc).alias == "node01_HDMI-A-2"
+    with pytest.raises(ndi_screens.ScreenError) as e:
+        r("Emulador EDID A2", sc)
+    assert e.value.reason == "ambiguous_output"
+    for bad in ("9", "Monitor central", ""):
+        with pytest.raises(ndi_screens.ScreenError):
+            r(bad, sc)

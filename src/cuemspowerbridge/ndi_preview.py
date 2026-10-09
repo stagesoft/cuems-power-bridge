@@ -38,10 +38,12 @@ from aiohttp import web
 from . import network_map
 from .engine_state import UNKNOWN
 from .ndi_relay import Relay, RelayError
+from .ndi_screens import DEFAULT_MAPPINGS, Screen, ScreenError
+from . import ndi_screens
 
 log = logging.getLogger(__name__)
 
-LAYER_ID = "ndi-preview"
+LAYER_ID = "ndi-preview"   # prefix; one layer per screen: ndi-preview-<connector> (D24)
 VC_OSC_PORT = 7000
 VC_IDENTIFIER = "Cuems:videocomposer"  # SYSLOG_IDENTIFIER of the VC's lines
 REMOTE_JOURNAL_DIR = "/var/log/journal/remote"
@@ -153,16 +155,17 @@ class Verdict:
     unknown_output: str | None = None
 
 
-def classify(messages: list[str], source: str, filepath: str | None = None) -> Verdict:
+def classify(messages: list[str], source: str, filepath: str | None = None,
+             layer_id: str = LAYER_ID) -> Verdict:
     """Classify a show request from the VC lines that followed its send.
     `filepath` is what was loaded (the relay's address form, rev 9); by
-    default the name form."""
+    default the name form. `layer_id` is the screen's layer (rev 10)."""
     url = filepath or f"ndi://{source}"
-    complete = f"Async load complete: {url} (cue ID: {LAYER_ID})"
-    failed = f"Async load failed for: {url} (cue ID: {LAYER_ID})"
-    gone = f"Layer no longer exists for cue ID: {LAYER_ID}"
-    cancelled = (f"AsyncVideoLoader: Discarding result for cancelled cue: {LAYER_ID}",
-                 f"AsyncVideoLoader: Skipping cancelled load for cue: {LAYER_ID}")
+    complete = f"Async load complete: {url} (cue ID: {layer_id})"
+    failed = f"Async load failed for: {url} (cue ID: {layer_id})"
+    gone = f"Layer no longer exists for cue ID: {layer_id}"
+    cancelled = (f"AsyncVideoLoader: Discarding result for cancelled cue: {layer_id}",
+                 f"AsyncVideoLoader: Skipping cancelled load for cue: {layer_id}")
     v = Verdict()
     format_known = False
     no_frame = False
@@ -176,7 +179,7 @@ def classify(messages: list[str], source: str, filepath: str | None = None) -> V
         elif msg == "NDI: empty source name":
             v.reason = "empty_source_name"
         m = _FIT_RE.match(msg)
-        if m and m.group("id") == LAYER_ID:
+        if m and m.group("id") == layer_id:
             v.fit = {"output": m.group("region"), "mode": m.group("mode"),
                      "pos": [int(m.group("x")), int(m.group("y"))],
                      "scale": float(m.group("sx")), "basis": m.group("basis")}
@@ -452,9 +455,9 @@ class Journal:
 
 @dataclass
 class _Request:
+    screen: Screen
     target: Target
     source: str
-    output: str | None
     mode: str
     mark: dict
     sent_at: float
@@ -466,16 +469,30 @@ class _Request:
     wiped: bool = False
     stopped: bool = False
 
+    @property
+    def layer_id(self) -> str:
+        return self.screen.layer_id
+
     def public(self, with_upstream: bool = True) -> dict:
-        out = {**self.target.public(), "source": self.source, "output": self.output,
-               "mode": self.mode, "via": "relay" if self.relay else "direct",
-               "confirm": self.verdict.state,
-               "reason": self.verdict.reason, "fit": self.verdict.fit,
-               "raced_by_load": self.raced_by_load, "wiped": self.wiped,
-               "stopped": self.stopped}
+        out = {"screen": self.screen.public(), "source": self.source, "mode": self.mode,
+               "route": "relay" if self.relay else "direct",
+               "machine_address": self.target.address,
+               "confirm": self.verdict.state, "reason": self.verdict.reason,
+               "fit": self.verdict.fit, "raced_by_load": self.raced_by_load,
+               "wiped": self.wiped, "stopped": self.stopped}
         if self.relay is not None:
             out["relay"] = self.relay.stats(with_upstream)
         return out
+
+
+@dataclass
+class SeenSource:
+    """One source in the cluster-wide list: who sees it, and at what address."""
+    name: str
+    seen_by: dict[str, str]      # machine -> "ip:port" ("" when unknown)
+
+    def public(self, n: int) -> dict:
+        return {"n": n, "name": self.name, "seen_by": sorted(self.seen_by)}
 
 
 class NdiPreview:
@@ -491,14 +508,14 @@ class NdiPreview:
         self._resolve = resolver or resolve_name
         self._route = router or route_dev
         self._route_src = src_router or route_src
-        # Relays by node VC address (rev 9): one preview per node at a time.
-        self._relays: dict[str, Relay] = {}
+        self.mappings_path = self.cfg.extras.get("ndi_mappings_path", DEFAULT_MAPPINGS)
         self._locks: dict[str, asyncio.Lock] = {}
         self._discovering: dict[str, asyncio.Task] = {}
         self._sources_cache: dict[str, tuple[float, list[Source]]] = {}
         self._outputs_cache: dict[str, tuple[float, list[dict]]] = {}
         self._versions: dict[str, str] = {}
-        self._last: _Request | None = None
+        self._previews: dict[str, _Request] = {}     # by screen alias (D24)
+        self._relays: dict[str, Relay] = {}          # by "<vc address>|<connector>"
         self._tasks: set[asyncio.Task] = set()
         self.vc_port = int(self.cfg.extras.get("ndi_vc_osc_port", VC_OSC_PORT))
 
@@ -547,6 +564,13 @@ class NdiPreview:
             raise PreviewError(400, "bad_node", detail=f"{node}: unresolvable")
         raise PreviewError(400, "bad_node", detail=f"{node}: not in network_map")
 
+    async def _machines(self) -> list[str]:
+        """'local' plus every node's label, as resolve_target() takes them."""
+        loop = asyncio.get_running_loop()
+        nodes = await loop.run_in_executor(None, network_map.parse, self.cfg.network_map_path)
+        return ["local"] + [n.role_id or n.alias or n.hostname or n.uuid for n in nodes
+                            if n.node_type == "NodeType.slave"]
+
     def _lock(self, target: Target) -> asyncio.Lock:
         return self._locks.setdefault(target.address, asyncio.Lock())
 
@@ -561,27 +585,56 @@ class NdiPreview:
         if v:
             self._versions[target.address] = v
 
+    # ---------------- screens (rev 10) ----------------
+
+    async def screens(self, live: bool = False) -> list[Screen]:
+        """The cluster's screens. `live` also asks every VC which connectors
+        it drives (marks absent ones, adds unmapped ones)."""
+        drives: dict[str, list[str]] | None = None
+        if live:
+            drives = {}
+            machines = await self._machines()
+            results = await asyncio.gather(*(self.outputs(m) for m in machines),
+                                           return_exceptions=True)
+            for m, r in zip(machines, results):
+                if not isinstance(r, BaseException):
+                    drives[m] = [o["name"] for o in r[1]]
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, ndi_screens.catalogue, self.mappings_path,
+                                          self.cfg.network_map_path, drives)
+
+    async def _screen(self, arg: str) -> Screen:
+        try:
+            return ndi_screens.resolve(arg, await self.screens())
+        except ScreenError as e:
+            raise PreviewError(e.status, e.reason, **e.extra)
+
     # ---------------- discovery ----------------
 
-    async def sources(self, node: str | None, timeout: int = 3) -> tuple[Target, list[Source]]:
-        """The sources a target can show: its own (sorted), then, for a node,
-        the ones only the controller sees, marked via="controller" (shown
-        through the relay, rev 9). `#n` indexes this list."""
+    async def sources(self) -> list[SeenSource]:
+        """Every source any VC of the cluster sees, sorted by name, with who
+        sees it. `#n` in show indexes this list."""
         if self.bridge.engine.running == "yes":
             raise PreviewError(409, "project_running")
-        target = await self.resolve_target(node)
-        if target.local:
-            return target, await self._list(target, timeout)
-        own, ctrl = await asyncio.gather(
-            self._list(target, timeout),
-            self._list(Target("local", "127.0.0.1", "loopback"), timeout),
-            return_exceptions=True)
-        if isinstance(own, BaseException):
-            raise own
-        names = {s.name for s in own}
-        extra = [] if isinstance(ctrl, BaseException) else [
-            Source(s.name, s.address, via="controller") for s in ctrl if s.name not in names]
-        return target, list(own) + sorted(extra, key=lambda s: s.name.lower())
+        machines = await self._machines()
+        targets = await asyncio.gather(*(self.resolve_target(m) for m in machines),
+                                       return_exceptions=True)
+        pairs = [(m, t) for m, t in zip(machines, targets) if isinstance(t, Target)]
+        lists = await asyncio.gather(*(self._list(t) for _, t in pairs), return_exceptions=True)
+        seen: dict[str, SeenSource] = {}
+        answered = 0
+        for (m, _), lst in zip(pairs, lists):
+            if isinstance(lst, BaseException):
+                log.info("ndi-preview: no source list from %s (%s)", m, lst)
+                continue
+            answered += 1
+            for src in lst:
+                seen.setdefault(src.name, SeenSource(src.name, {})).seen_by[
+                    "controller" if m == "local" else m] = src.address
+        if not answered:
+            raise PreviewError(504, "no_vc_answer",
+                               hint="no videocomposer answered ndi/discover (older than 0.1.2-8?)")
+        return sorted(seen.values(), key=lambda s: s.name.lower())
 
     async def _list(self, target: Target, timeout: int = 3) -> list[Source]:
         cached = self._sources_cache.get(target.address)
@@ -633,10 +686,13 @@ class NdiPreview:
         names = re.findall(r"^\s*\d+\.\s+(.+?)\s*$", out.decode(errors="replace"), re.M)
         return sorted((Source(n, "") for n in names), key=lambda s: s.name.lower())
 
-    # ---------------- outputs ----------------
+    # ---------------- outputs of one VC ----------------
 
-    async def outputs(self, node: str | None) -> tuple[Target, list[dict]]:
-        target = await self.resolve_target(node)
+    async def outputs(self, machine: str | None) -> tuple[Target, list[dict]]:
+        target = await self.resolve_target(machine)
+        cached = self._outputs_cache.get(target.address)
+        if cached and time.monotonic() - cached[0] < OUTPUTS_CACHE_S:
+            return target, cached[1]
         self.journal.check_readable(target)
         mark = await self.journal.mark(target)
         self._send(target, "/videocomposer/output/list")
@@ -656,63 +712,57 @@ class NdiPreview:
 
     # ---------------- show / stop / status ----------------
 
-    async def show(self, source_arg: str, node: str | None, output: str | None,
-                   mode: str = "fill", wait: bool = False,
-                   force_unknown_engine: bool = False) -> dict:
+    async def show(self, source_arg: str, output_arg: str, mode: str = "fill",
+                   wait: bool = False, force_unknown_engine: bool = False) -> dict:
         if mode not in FIT_MODES:
             raise PreviewError(400, "bad_mode", modes=list(FIT_MODES))
         err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine)
         if err:
             raise err
-        target = await self.resolve_target(node)
+        screen = await self._screen(output_arg)
+        target = await self.resolve_target(screen.target)
         lock = self._lock(target)
         if lock.locked():
-            raise PreviewError(409, "busy", hint="a preview request on this VC is in flight")
+            raise PreviewError(409, "busy", hint="a preview request on this machine is in flight")
         await lock.acquire()
         new_relay: Relay | None = None
+        key = f"{target.address}|{screen.connector}"
         try:
             self.journal.check_readable(target)
-            entry = await self._choose_source(target, node, source_arg)
-            source = entry.name
-            if output:
-                outs = self._outputs_cache.get(target.address)
-                if outs and time.monotonic() - outs[0] < OUTPUTS_CACHE_S:
-                    names = [o["name"] for o in outs[1]]
-                    if output not in names:
-                        raise PreviewError(400, "bad_output", have=names)
+            name, address, route = await self._route_for(target, screen, source_arg)
+            if route == "relay":
+                await self._relay_preconditions(target, address)
             err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine)
             if err:
                 raise err
-            if entry.via == "controller":
-                await self._relay_preconditions(target, entry)
+            layer = screen.layer_id
             mark = await self.journal.mark(target)
-            self._send(target, "/videocomposer/layer/unload", LAYER_ID)
-            # The previous relay goes only after the unload, so the old layer
-            # does not sit reconnecting to a closed port.
-            await self._close_relay(target.address, "replaced")
-            filepath = f"ndi://{source}"
-            if entry.via == "controller":
-                new_relay = await self._open_relay(target, entry)
+            self._send(target, "/videocomposer/layer/unload", layer)
+            # The screen's previous relay goes only after its unload, so the
+            # old layer does not sit reconnecting to a closed port.
+            await self._close_relay(key, "replaced")
+            filepath = f"ndi://{name}"
+            if route == "relay":
+                new_relay = await self._open_relay(target, key, address)
                 filepath = f"ndi://@{new_relay.address}"
-            self._send(target, "/videocomposer/layer/load", filepath, LAYER_ID)
-            fit_args = [output, mode] if output else [mode]
-            self._send(target, f"/videocomposer/layer/{LAYER_ID}/fit_output", *fit_args)
-            self._send(target, f"/videocomposer/layer/{LAYER_ID}/zorder", 1000)
-            self._send(target, f"/videocomposer/layer/{LAYER_ID}/visible", 1)
-            log.info("ndi-preview: %s on %s (%s) output=%s mode=%s%s", source,
-                     target.key, target.address, output or "(first)", mode,
-                     f" via relay {new_relay.address}" if new_relay else "")
-            req = _Request(target, source, output, mode, mark, time.time(),
+            self._send(target, "/videocomposer/layer/load", filepath, layer)
+            self._send(target, f"/videocomposer/layer/{layer}/fit_output", screen.connector, mode)
+            self._send(target, f"/videocomposer/layer/{layer}/zorder", 1000)
+            self._send(target, f"/videocomposer/layer/{layer}/visible", 1)
+            log.info("ndi-preview: %s on %s (%s %s) mode=%s route=%s%s", name, screen.alias,
+                     target.key, target.address, mode, route,
+                     f" {new_relay.address}" if new_relay else "")
+            req = _Request(screen, target, name, mode, mark, time.time(),
                            filepath=filepath, relay=new_relay)
-            self._last = req
+            self._previews[screen.alias] = req
         except BaseException:
             if new_relay is not None:
-                await self._close_relay(target.address, "show failed")
+                await self._close_relay(key, "show failed")
             lock.release()
             raise
         # The lock is held until the journal shows how this load ended: two
-        # overlapping loads of one layer id would leave the VC showing the
-        # first while the second is confirmed.
+        # overlapping loads on one VC would leave it showing the first while
+        # the second is confirmed.
         task = self._spawn(self._confirm(req, lock))
         if not wait:
             return {"sent": True, **req.public(), "confirm": "pending"}
@@ -723,6 +773,45 @@ class NdiPreview:
             raise PreviewError(502, req.verdict.reason or req.verdict.state,
                                request=req.public())
         return {"sent": True, **req.public()}
+
+    async def _route_for(self, target: Target, screen: Screen, arg: str) -> tuple[str, str, str]:
+        """(source name, address, "direct"|"relay") for this screen. A name
+        the screen's own machine already lists goes direct without asking
+        anyone else; otherwise the cluster-wide list decides."""
+        own = self._sources_cache.get(target.address)
+        if (is_exact_name(arg) and own and time.monotonic() - own[0] < SOURCES_CACHE_S
+                and any(s.name == arg for s in own[1])):
+            return arg, next(s.address for s in own[1] if s.name == arg), "direct"
+        machine = "controller" if target.local else target.key
+        listed = await self.sources()
+        if arg.startswith("#"):
+            try:
+                idx = int(arg[1:])
+            except ValueError:
+                raise PreviewError(400, "bad_source")
+            if not 1 <= idx <= len(listed):
+                raise PreviewError(404, "source_not_found", have=len(listed))
+            entry = listed[idx - 1]
+        else:
+            name = pick_source(arg, [Source(s.name, "") for s in listed])
+            entry = next((s for s in listed if s.name == name), None)
+            if entry is None:
+                # An exact name nobody lists: the controller's VC may still
+                # find it (rev 8 behaviour); a node needs a route, so no.
+                if target.local:
+                    return name, "", "direct"
+                raise PreviewError(404, "source_not_found",
+                                   hint=f"no machine of the cluster sees {name!r}")
+        if machine in entry.seen_by:
+            return entry.name, entry.seen_by[machine], "direct"
+        if target.local:
+            raise PreviewError(404, "source_not_found",
+                               hint=f"the controller does not see {entry.name!r}")
+        if "controller" in entry.seen_by:
+            return entry.name, entry.seen_by["controller"], "relay"
+        raise PreviewError(404, "source_not_found",
+                           hint=f"neither {machine} nor the controller sees {entry.name!r} "
+                                f"(seen by: {', '.join(sorted(entry.seen_by))})")
 
     async def _confirm(self, req: _Request, lock: asyncio.Lock) -> None:
         try:
@@ -735,12 +824,12 @@ class NdiPreview:
                     if self.bridge.engine.load not in ("", UNKNOWN):
                         # A project load raced the send: get out of its way.
                         req.raced_by_load = True
-                        self._send(req.target, "/videocomposer/layer/unload", LAYER_ID)
+                        self._send(req.target, "/videocomposer/layer/unload", req.layer_id)
                         log.warning("ndi-preview: a project was loaded during the "
                                     "preview send; preview unloaded")
                 msgs = await self.journal.read(req.target, req.mark)
                 self._note_version(req.target, msgs)
-                v = classify(msgs, req.source, req.filepath)
+                v = classify(msgs, req.source, req.filepath, req.layer_id)
                 if (req.relay is not None and req.relay.upstream_errors
                         and not req.relay.bytes_to_node):
                     v = Verdict(state="failed", reason="relay_upstream_unreachable")
@@ -751,7 +840,7 @@ class NdiPreview:
                         # One more read so the re-fit on the real size is seen.
                         await asyncio.sleep(POLL_S)
                         v = classify(await self.journal.read(req.target, req.mark),
-                                     req.source, req.filepath)
+                                     req.source, req.filepath, req.layer_id)
                         if (req.relay is not None and v.state == "frames"
                                 and not req.relay.bytes_to_node):
                             v = Verdict(state="failed", reason="relay_stalled", fit=v.fit)
@@ -759,8 +848,8 @@ class NdiPreview:
                     req.confirmed_at = time.time()
                     if v.reason == "unknown_output":
                         # It would sit visible at canvas centre otherwise.
-                        self._send(req.target, "/videocomposer/layer/unload", LAYER_ID)
-                    log.info("ndi-preview: %s on %s → %s%s", req.source, req.target.key,
+                        self._send(req.target, "/videocomposer/layer/unload", req.layer_id)
+                    log.info("ndi-preview: %s on %s → %s%s", req.source, req.screen.alias,
                              v.state, f" ({v.reason})" if v.reason else "")
                     return
             req.verdict = Verdict(state="unconfirmed",
@@ -777,50 +866,42 @@ class NdiPreview:
         finally:
             lock.release()
 
-    async def stop(self, node: str | None = None, all_: bool = False) -> list[dict]:
-        targets: list[Target] = []
-        if all_:
-            loop = asyncio.get_running_loop()
-            nodes = await loop.run_in_executor(None, network_map.parse, self.cfg.network_map_path)
-            keys = [None] + [n.role_id or n.alias or n.hostname or n.ip for n in nodes
-                             if n.node_type == "NodeType.slave"]
-            resolved = await asyncio.gather(*(self.resolve_target(k) for k in keys if k or k is None),
-                                            return_exceptions=True)
-            seen: set[str] = set()
-            for t in resolved:
-                if isinstance(t, Target) and t.address not in seen:
-                    seen.add(t.address)
-                    targets.append(t)
-        else:
-            targets.append(await self.resolve_target(node))
-        for t in targets:
-            self._send(t, "/videocomposer/layer/unload", LAYER_ID)
-        for t in targets:
-            await self._close_relay(t.address, "stop")
-        if self._last and any(t.address == self._last.target.address for t in targets):
-            self._last.stopped = True
-        log.info("ndi-preview: stop sent to %s", ", ".join(t.address for t in targets))
-        return [t.public() for t in targets]
+    async def stop(self, output_arg: str | None = None) -> list[dict]:
+        """One screen, or (no argument) every screen of the cluster: the
+        catalogue's connectors on every machine, so a preview started before
+        a bridge restart is cleared too."""
+        stopped: list[dict] = []
+        screens = [await self._screen(output_arg)] if output_arg else await self.screens()
+        targets: dict[str, Target] = {}
+        for sc in screens:
+            if sc.target not in targets:
+                try:
+                    targets[sc.target] = await self.resolve_target(sc.target)
+                except PreviewError:
+                    continue
+            t = targets[sc.target]
+            self._send(t, "/videocomposer/layer/unload", sc.layer_id)
+            await self._close_relay(f"{t.address}|{sc.connector}", "stop")
+            req = self._previews.get(sc.alias)
+            if req is not None:
+                req.stopped = True
+            stopped.append(sc.public())
+        if not output_arg:
+            for key in list(self._relays):
+                await self._close_relay(key, "stop")
+        log.info("ndi-preview: stop sent to %s", ", ".join(s["alias"] for s in stopped))
+        return stopped
 
     async def status(self, authorized: bool = True) -> dict:
-        """`authorized` = the request carried a valid token: only then do the
-        relay's upstream address and byte counts appear (D22)."""
+        """Per screen (D24). `authorized` = the request carried a valid token:
+        only then do relay upstream addresses and byte counts appear (D22)."""
         eng = self.bridge.engine
-        body: dict = {
-            "engine": {"running": eng.running, "load": eng.load, "armed": eng.armed},
-            "auto_load": self.bridge.auto_load_state(),
-            "vc_versions": dict(self._versions),
-            "relays": [r.stats(authorized) for r in self._relays.values()],
-            "last": None,
-        }
-        req = self._last
-        if req is not None and req.target.address not in self._versions:
-            # The startup line is usually older than the request's cursor.
-            version = await self.journal.version(req.target)
-            if version:
-                self._versions[req.target.address] = version
-                body["vc_versions"] = dict(self._versions)
-        if req is not None:
+        previews = []
+        for alias, req in sorted(self._previews.items()):
+            if req.target.address not in self._versions:
+                version = await self.journal.version(req.target)
+                if version:
+                    self._versions[req.target.address] = version
             if req.verdict.state in ("frames", "no_frames_yet") and not req.stopped:
                 try:
                     msgs = await self.journal.read(req.target, req.mark)
@@ -831,59 +912,44 @@ class NdiPreview:
                         req.wiped = True
                 except PreviewError:
                     pass
-            body["last"] = req.public(authorized)
-        return body
+            previews.append(req.public(authorized))
+        return {
+            "engine": {"running": eng.running, "load": eng.load, "armed": eng.armed},
+            "auto_load": self.bridge.auto_load_state(),
+            "vc_versions": dict(self._versions),
+            "previews": previews,
+            "relays": [r.stats(authorized) for r in self._relays.values()],
+        }
 
     # ---------------- relay (rev 9) ----------------
 
-    async def _choose_source(self, target: Target, node: str | None, arg: str) -> Source:
-        """Pick the source, direct or relayed. An exact name the node itself
-        lists goes direct without asking the controller."""
-        own = self._sources_cache.get(target.address)
-        if (is_exact_name(arg) and own and time.monotonic() - own[0] < SOURCES_CACHE_S
-                and any(s.name == arg for s in own[1])):
-            return next(s for s in own[1] if s.name == arg)
-        if target.local and is_exact_name(arg) and not arg.startswith("#"):
-            cached = own[1] if own else None
-            if not cached:
-                return Source(arg, "")  # rev-8 fast path: let the VC look for it
-        _, merged = await self.sources(node)
-        name = pick_source(arg, merged)
-        for s in merged:
-            if s.name == name:
-                return s
-        if target.local:
-            return Source(name, "")
-        raise PreviewError(404, "source_not_found",
-                           hint=f"neither {target.key} nor the controller sees {name!r}")
-
-    async def _relay_preconditions(self, target: Target, entry: Source) -> None:
+    async def _relay_preconditions(self, target: Target, address: str) -> None:
         line = await self.journal.transport(target)
         if not line or not line.startswith("NDI receive transport: base TCP"):
             raise PreviewError(409, "relay_needs_vc", node=target.key,
                                vc_version=await self.journal.version(target), transport=line,
-                               hint="this node's videocomposer cannot take a relayed source "
+                               hint="this machine's videocomposer cannot take a relayed source "
                                     "(needs >= 0.1.2-8 with base-TCP NDI receive)")
-        if not entry.address:
+        if not address:
             raise PreviewError(409, "relay_needs_controller_vc",
                                hint="the controller's videocomposer reports no source address "
                                     "(needs >= 0.1.2-8)")
 
-    async def _open_relay(self, target: Target, entry: Source) -> Relay:
+    async def _open_relay(self, target: Target, key: str, address: str) -> Relay:
         listen_ip = await self._route_src(target.address)
         if not listen_ip:
             raise PreviewError(503, "relay_no_route", node=target.key, address=target.address)
-        relay = Relay(target.address, entry.address, listen_ip, should_close=self._relay_should_close)
+        relay = Relay(target.address, address, listen_ip, should_close=self._relay_should_close)
         try:
             await relay.start()
         except RelayError as e:
             raise PreviewError(502 if e.reason == "relay_upstream_unreachable" else 503,
                                e.reason, detail=e.detail)
-        self._relays[target.address] = relay
+        self._relays[key] = relay
         return relay
 
-    async def _close_relay(self, address: str, reason: str) -> None:
-        relay = self._relays.pop(address, None)
+    async def _close_relay(self, key: str, reason: str) -> None:
+        relay = self._relays.pop(key, None)
         if relay is not None:
             await relay.close(reason)
 
@@ -925,41 +991,38 @@ class NdiPreview:
         if (r := self._auth(request, "ndi_sources")):
             return r
         try:
-            timeout = int(request.query.get("timeout", "3"))
-            target, found = await self.sources(request.query.get("node"), timeout)
+            found = await self.sources()
         except PreviewError as e:
             return self._fail(e)
-        except ValueError:
-            return self.bridge._err("bad_timeout", 400)
-        body = {"ok": True, **target.public(), "list": target.key,
-                "sources": [{"n": i + 1, "name": s.name, "addr": s.address, "via": s.via}
-                            for i, s in enumerate(found)]}
+        body = {"ok": True, "sources": [s.public(i + 1) for i, s in enumerate(found)]}
         if not found:
-            body["hint"] = ("no NDI source seen from this VC or the controller: put the laptop "
-                            "on the nodes' switch, the controller's network or its WiFi")
+            body["hint"] = ("no NDI source seen by any machine: put the laptop on the nodes' "
+                            "switch, the controller's network or its WiFi")
         return web.json_response(body)
 
     async def h_outputs(self, request: web.Request) -> web.Response:
         if (r := self._auth(request, "ndi_outputs")):
             return r
         try:
-            target, outs = await self.outputs(request.query.get("node"))
+            screens = await self.screens(live=True)
         except PreviewError as e:
             return self._fail(e)
-        return web.json_response({"ok": True, **target.public(), "outputs": outs})
+        return web.json_response({"ok": True, "outputs": [s.public() for s in screens]})
 
     async def h_preview(self, request: web.Request) -> web.Response:
         if (r := self._auth(request, "ndi_preview")):
             return r
         body = await self._body(request)
         source = body.get("source") or request.query.get("source")
+        output = body.get("output") or request.query.get("output")
         if not source:
             return self.bridge._err("missing_source", 400)
+        if not output:
+            return self.bridge._err("missing_output", 400)
         wait = bool(body.get("wait")) or request.query.get("wait") == "1"
         try:
             result = await self.show(
-                str(source), body.get("node") or request.query.get("node"),
-                body.get("output") or request.query.get("output"),
+                str(source), str(output),
                 str(body.get("mode") or request.query.get("mode") or "fill"),
                 wait=wait, force_unknown_engine=bool(body.get("force_unknown_engine")))
         except PreviewError as e:
@@ -970,9 +1033,9 @@ class NdiPreview:
         if (r := self._auth(request, "ndi_stop")):
             return r
         body = await self._body(request)
+        output = body.get("output") or request.query.get("output")
         try:
-            stopped = await self.stop(body.get("node") or request.query.get("node"),
-                                      bool(body.get("all")) or request.query.get("all") == "1")
+            stopped = await self.stop(str(output) if output else None)
         except PreviewError as e:
             return self._fail(e)
         return web.json_response({"ok": True, "stopped": stopped})
@@ -982,8 +1045,8 @@ class NdiPreview:
         return web.json_response({"ok": True, **(await self.status(authorized))})
 
     async def close(self) -> None:
-        for address in list(self._relays):
-            await self._close_relay(address, "bridge stop")
+        for key in list(self._relays):
+            await self._close_relay(key, "bridge stop")
         for t in list(self._tasks):
             t.cancel()
         for t in list(self._tasks):
