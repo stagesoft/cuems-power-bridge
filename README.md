@@ -140,7 +140,8 @@ Stream Deck Nano ─USB─► Bitfocus Companion ─HTTP POST /go|/stop|/shutdow
 
 * **Bitfocus Companion** — Stream Deck button interface; issues HTTP POSTs to `/go`, `/stop`,
   `/setnextcue`, `/gocue`, `/shutdown` using Companion's HTTP module, plus the displays-only
-  `/poweron` / `/poweroff` and `/brightness`. The bridge translates these to WebSocket-OSC
+  `/poweron` / `/poweroff` and `/brightness`, and the montaje NDI preview (`/ndi/preview`,
+  `/ndi/stop`). The bridge translates these to WebSocket-OSC
   frames for the engine, to projector commands (PJLink / ESC/VP21), or to the full shutdown
   sequence.
 * **Shelly Pro 1** — wired flip-switch triggered by a physical power switch (SW0). On
@@ -191,6 +192,12 @@ The central coordinator. Owns the HTTP server, the state machine, and all sub-cl
   in-flight task, then spawns its own (or joins one already in flight), so the last request
   wins. `/poweroff` queries first and skips devices already off or cooling down. `?wait=1`
   awaits the result and returns per-device `results`.
+* **`NdiPreview`** (`ndi_preview.py`, routes `/ndi/sources`, `/ndi/outputs`, `/ndi/preview`,
+  `/ndi/stop`, `/ndi/status`; CLI `cuems-ndi-preview`) — NDI preview for montajes: shows an
+  NDI source on any node's output while no project is loaded, by driving that node's
+  videocomposer over OSC (`ndi://` load, `fit_output`, `ndi/discover`; videocomposer
+  ≥ 0.1.2-8) and reading its answers back from the journal. Refused while a project is
+  loaded or running and while the bridge's own auto-load is pending. See CLAUDE.md.
 * **`Bridge.handle_shutdown(request)`** — `POST /shutdown`; acquires `asyncio.Lock`, runs
   the refuse-if-running guard, then delegates to `_run_shutdown()`.
 * **`Bridge._run_shutdown()`** — implements the 8-step shutdown sequence:
