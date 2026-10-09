@@ -19,6 +19,9 @@ cuems-power-bridge (0.3.0-10) UNRELEASED; urgency=medium
     with an empty output is refused instead of clearing every screen.
     /ndi/sources is refused while a project is loaded or the engine is
     unknown; /ndi/status carries "blocked" and is computed once a second.
+  * /ndi/* no longer asks for the shared token (like the CUEMS UI, open on the
+    internal network until there are users); every other endpoint still
+    does, and the page never sees the token.
   * The unit joins systemd-journal and systemd-journal-remote: the preview
     reads the videocomposers' answers from the local and uploaded journals.
     postinst warns if either group is missing (the unit would fail 216/GROUP).

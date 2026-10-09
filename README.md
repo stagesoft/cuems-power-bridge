@@ -591,8 +591,9 @@ either read-only (config, resolved node list) or protected by `asyncio.Lock`
 
 Base URL: `http://<controller>:8478` (default bind `0.0.0.0:8478`).
 
-All endpoints except `GET /status` validate the `X-Auth-Token` header when
-`shared_token` is configured. All responses are JSON `{"ok": bool, "reason": "<token>"}`.
+All endpoints except `GET /status` and the NDI preview's `/ndi/*` validate the `X-Auth-Token`
+header when `shared_token` is configured (`/ndi/*` is open on the internal network like the
+CUEMS UI; a valid token only adds the relay details to `GET /ndi/status`). All responses are JSON `{"ok": bool, "reason": "<token>"}`.
 
 ---
 
@@ -1211,9 +1212,9 @@ Add buttons using Companion's **HTTP** module:
 | SHUTDOWN | POST | `http://controller.local:8478/shutdown` | `X-Auth-Token: <token>` |
 | PROY ON | POST | `http://localhost:8478/poweron?wait=1` | `X-Auth-Token: <token>` |
 | PROY OFF | POST | `http://localhost:8478/poweroff?wait=1` | `X-Auth-Token: <token>` |
-| NDI → *screen* | POST | `http://localhost:8478/ndi/preview` | `X-Auth-Token: <token>`; body `{"source":"#1","output":"<screen>"}` |
-| QUITAR *screen* | POST | `http://localhost:8478/ndi/stop` | `X-Auth-Token: <token>`; body `{"output":"<screen>"}` |
-| QUITAR TODO | POST | `http://localhost:8478/ndi/stop` | `X-Auth-Token: <token>`; body `{}` |
+| NDI → *screen* | POST | `http://localhost:8478/ndi/preview` | none; body `{"source":"#1","output":"<screen>"}` |
+| QUITAR *screen* | POST | `http://localhost:8478/ndi/stop` | none; body `{"output":"<screen>"}` |
+| QUITAR TODO | POST | `http://localhost:8478/ndi/stop` | none; body `{}` |
 
 PROY ON / PROY OFF switch only this controller's projectors (displays, not machines). With
 `?wait=1` the button can show the per-device result; Companion's HTTP timeout must exceed the
@@ -1240,9 +1241,10 @@ any other type is refused with `415 bad_content_type`.
 laptop on the controller's network or WiFi. It lists the cluster's sources and screens by
 itself (no per-site setup): pick a source, press **Mostrar** on a screen, **Quitar** to take it
 off. The top line says whether previews are possible (a loaded or running project, an
-unknown engine or a pending auto-load block them); refusals are shown in plain Spanish. When
-`shared_token` is set, the page asks for it once and keeps it in that browser ("Olvidar
-contraseña" clears it).
+unknown engine or a pending auto-load block them); refusals are shown in plain Spanish. It asks
+for no password: like the CUEMS UI on `:80`, the NDI preview is open on the internal network
+until CUEMS has users. Only `/ndi/*` is open; `shared_token` keeps guarding every other
+endpoint, and it is never handed to the page.
 
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).

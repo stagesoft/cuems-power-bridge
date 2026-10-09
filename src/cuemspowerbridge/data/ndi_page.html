@@ -58,10 +58,6 @@ button { font: inherit; min-height: 44px; padding: 8px 16px; border-radius: 8px;
 button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-button.link { background: none; border: none; color: var(--muted); text-decoration: underline;
-  min-height: 0; padding: 4px; }
-input[type=password] { font: inherit; padding: 8px; min-height: 44px; border-radius: 8px;
-  border: 1px solid var(--line); background: var(--card); color: var(--fg); flex: 1 1 200px; }
 ul.sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 ul.sources label { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--card); cursor: pointer; }
@@ -74,8 +70,6 @@ ul.sources input { margin-top: 4px; width: 20px; height: 20px; flex: none; }
 .now { margin: 0; overflow-wrap: anywhere; }
 .now.frames { color: var(--ok); }
 .now.failed { color: var(--bad); }
-.box { border: 1px solid var(--line); border-radius: 8px; background: var(--card); padding: 12px;
-  margin-top: 12px; }
 footer { margin-top: 32px; }
 </style>
 </head>
@@ -84,15 +78,6 @@ footer { margin-top: 32px; }
   <h1>Previsualización NDI</h1>
   <p id="state" class="state" aria-live="polite">Conectando con el bridge…</p>
   <p id="banner" class="banner" role="alert" hidden></p>
-
-  <div id="token-box" class="box" hidden>
-    <p class="msg">El bridge pide contraseña (la misma que usan los botones de Companion).</p>
-    <div class="row">
-      <input id="token" type="password" autocomplete="off" aria-label="Contraseña del bridge"
-             placeholder="Contraseña del bridge">
-      <button id="token-save" class="primary" type="button">Guardar</button>
-    </div>
-  </div>
 
   <h2>Fuentes</h2>
   <div class="row">
@@ -113,7 +98,6 @@ footer { margin-top: 32px; }
   <div id="screens" class="screens msg"></div>
 
   <footer class="row">
-    <button id="forget" class="link" type="button">Olvidar contraseña</button>
     <span class="muted">Desconecta el portátil antes de la función.</span>
   </footer>
 </main>
@@ -130,7 +114,6 @@ const REASONS = {
   bad_mode: "Modo de encaje desconocido",
   bad_node: "No se encuentra esa máquina en el mapa de red",
   bad_source: "Fuente mal indicada",
-  bad_token: "Contraseña incorrecta",
   busy: "Esa máquina está terminando otra carga; prueba en unos segundos",
   empty_source_name: "Fuente sin nombre",
   engine_unknown: "No hay conexión con el motor",
@@ -178,10 +161,8 @@ const BLOCKED = {
   auto_load_active: "Carga automática pendiente"
 };
 
-const TOKEN_KEY = "cuems-ndi-token";
 const STATUS_MS = 3000, SOURCES_MS = 15000, OUTPUTS_MS = 60000;
 
-let token = readToken();
 let selected = null;        // source name (never "#n": the list can shift)
 let sourceList = [];
 let cards = new Map();      // screen alias -> card parts
@@ -194,15 +175,6 @@ const inflight = new Set(); // screen aliases with a request in flight
 const errors = new Map();   // screen alias -> last action error
 
 const $ = (id) => document.getElementById(id);
-
-function readToken() {
-  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
-}
-function writeToken(v) {
-  try {
-    if (v) { localStorage.setItem(TOKEN_KEY, v); } else { localStorage.removeItem(TOKEN_KEY); }
-  } catch (e) { /* private window: the token lives only in this page */ }
-}
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -219,8 +191,7 @@ function say(reason) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function api(method, path, body, retry = true) {
-  const headers = {};
-  if (token) { headers["X-Auth-Token"] = token; }
+  const headers = {};   // no token: /ndi/* is open on the internal network (D30)
   const opts = { method, headers, cache: "no-store" };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -234,24 +205,7 @@ async function api(method, path, body, retry = true) {
     await sleep(300);
     return api(method, path, body, false);
   }
-  if (data && data.reason === "bad_token") { askToken(); }
   return data || { ok: false, reason: "bad_reply" };
-}
-
-function askToken() {
-  const box = $("token-box");
-  if (box.hidden) {
-    box.hidden = false;
-    $("token").value = "";
-    $("token").focus();
-  }
-}
-
-function saveToken() {
-  token = $("token").value.trim();
-  writeToken(token);
-  $("token-box").hidden = true;
-  refreshAll();
 }
 
 // ---------------- status ----------------
@@ -501,11 +455,8 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-$("token-save").addEventListener("click", saveToken);
-$("token").addEventListener("keydown", (e) => { if (e.key === "Enter") { saveToken(); } });
 $("refresh").addEventListener("click", loadSources);
 $("stop-all").addEventListener("click", doStopAll);
-$("forget").addEventListener("click", () => { token = ""; writeToken(""); askToken(); });
 
 refreshAll();
 startTimers();

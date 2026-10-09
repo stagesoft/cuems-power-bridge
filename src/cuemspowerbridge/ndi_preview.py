@@ -1027,9 +1027,14 @@ class NdiPreview:
         app.router.add_post("/ndi/stop", self.h_stop)
         app.router.add_get("/ndi/status", self.h_status)
 
-    def _auth(self, request: web.Request, key: str) -> web.Response | None:
-        if not self.bridge._check_token(request):
-            return self.bridge._err("bad_token", 401)
+    def _gate(self, request: web.Request, key: str) -> web.Response | None:
+        """No token on /ndi/* (D30, Ion 2026-10-09): like the CUEMS UI, the
+        preview is open on the internal network until there are users. The
+        bridge's shared_token keeps guarding /go, /stop, /shutdown, /poweroff…;
+        handing it to a page would hand those out too. What stands between a
+        stray web page and these endpoints is D27 (JSON only → a CORS
+        preflight the bridge never answers). A valid token still unlocks the
+        relay details in /ndi/status (D22)."""
         if not self.bridge._rate.allow(key):
             return self.bridge._err("rate_limited", 429)
         return None
@@ -1067,7 +1072,7 @@ class NdiPreview:
         raise web.HTTPMovedPermanently(location="ndi/")
 
     async def h_sources(self, request: web.Request) -> web.Response:
-        if (r := self._auth(request, "ndi_sources")):
+        if (r := self._gate(request, "ndi_sources")):
             return r
         try:
             found = await self.sources()
@@ -1080,7 +1085,7 @@ class NdiPreview:
         return web.json_response(body)
 
     async def h_outputs(self, request: web.Request) -> web.Response:
-        if (r := self._auth(request, "ndi_outputs")):
+        if (r := self._gate(request, "ndi_outputs")):
             return r
         try:
             # The live check asks every VC for its outputs: not during a show.
@@ -1091,7 +1096,7 @@ class NdiPreview:
         return web.json_response({"ok": True, "outputs": [s.public() for s in screens]})
 
     async def h_preview(self, request: web.Request) -> web.Response:
-        if (r := self._auth(request, "ndi_preview")):
+        if (r := self._gate(request, "ndi_preview")):
             return r
         try:
             body = await self._body(request)
@@ -1113,7 +1118,7 @@ class NdiPreview:
         return web.json_response({"ok": True, **result}, status=200 if wait else 202)
 
     async def h_stop(self, request: web.Request) -> web.Response:
-        if (r := self._auth(request, "ndi_stop")):
+        if (r := self._gate(request, "ndi_stop")):
             return r
         try:
             body = await self._body(request)

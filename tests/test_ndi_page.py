@@ -120,10 +120,11 @@ def test_every_guard_refusal_has_a_top_line():
                                  "auto_load_active"}
 
 
-def test_token_field_hygiene():
-    m = re.search(r'<input id="token"[^>]*>', PAGE, re.S)
-    assert m and 'type="password"' in m.group(0) and 'autocomplete="off"' in m.group(0)
-    assert "console." not in SCRIPT
+def test_page_never_asks_for_or_stores_a_token():
+    # D30: /ndi/* needs no token; the bridge's token guards /go, /shutdown…
+    # and must never reach a page.
+    for banned in ("X-Auth-Token", "localStorage", "type=\"password\"", "console."):
+        assert banned not in PAGE, banned
 
 
 # --------------------------------------------------------------------------
@@ -157,6 +158,23 @@ async def test_page_is_served_without_token_with_its_headers(tmp_path):
         assert "SPDX" in await r.text()
         r = await client.get("/ndi", allow_redirects=False)
         assert r.status == 301 and r.headers["Location"] == "ndi/"
+    finally:
+        await client.close()
+
+
+async def test_ndi_endpoints_need_no_token_even_when_the_bridge_has_one(tmp_path):
+    pv, sent = _preview(tmp_path)
+    client = await _client(pv, token="s3cret")
+    try:
+        r = await client.get("/ndi/outputs")
+        assert r.status == 200
+        r = await client.post("/ndi/stop", json={"output": "Monitor izquierda"})
+        assert r.status == 200 and sent, "stop went through without a token"
+        await asyncio.sleep(0.25)
+        r = await client.post("/ndi/preview", json={"source": "X (Y)", "output": "nope"})
+        assert r.status != 401
+        r = await client.get("/ndi/status")
+        assert r.status == 200
     finally:
         await client.close()
 
