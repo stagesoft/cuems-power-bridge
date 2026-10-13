@@ -1246,6 +1246,14 @@ for no password: like the CUEMS UI on `:80`, the NDI preview is open on the inte
 until CUEMS has users. Only `/ndi/*` is open; `shared_token` keeps guarding every other
 endpoint, and it is never handed to the page.
 
+Each screen shows its resolution and refresh ("1920×1080 · 60 Hz"); a preview shows its
+source's size and frame rate ("1920×1080 · 25 fps"), and "escalada ×1.50" when it is scaled to
+the screen. A source's size is known only once it is on some screen (NDI discovery does not
+carry it). A screen whose machine does not answer is marked "no responde en la red" and its
+Mostrar is disabled; one whose journal has stopped arriving is marked too (the preview can
+neither be routed nor confirmed without it — `ndi_journal_stale_s` in `power-bridge.conf`,
+default 600 s).
+
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).
 

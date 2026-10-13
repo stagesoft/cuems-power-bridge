@@ -1,3 +1,23 @@
+cuems-power-bridge (0.3.0-11) UNRELEASED; urgency=medium
+
+  * NDI preview (plan 869ekxuez rev 12.2): sizes and machine health.
+    - Each screen reports its mode and region; each preview its source size
+      (from that layer's own fit line, never from an untagged format line),
+      the frame rate at open, and the scale in screen pixels. The source list
+      shows a size only for sources on screen (no probing).
+    - Machine health off the request path: ICMP or TCP/22 or a fresh journal
+      per node, the videocomposer unit on the controller, refreshed every 5 s
+      while the page is used and never during a show. Previews to an
+      unreachable machine, a stopped controller VC or a node whose journal
+      stopped arriving are refused at once (503 machine_unreachable, vc_down,
+      journal_stale; ndi_journal_stale_s, default 600); discovery skips them.
+    - An unconfirmed preview says why in a token (no_vc_reply or the health
+      reason); the English hint moves to "detail". A videocomposer restart
+      after a preview marks it wiped.
+    - The page and cuems-ndi-preview show modes, sizes and machine states.
+
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 13 Oct 2026 13:30:04 +0200
+
 cuems-power-bridge (0.3.0-10) unstable; urgency=medium
 
   * NDI preview for montajes (ClickUp 869ekxuez): GET /ndi/sources,
