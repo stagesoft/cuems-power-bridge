@@ -90,8 +90,11 @@ def _loaded(source=SRC, fmt=True, layer="ndi-preview"):
     lines = [f"NDI: Connected to source: {source}"]
     lines.append("NDI: Source format: 1920x1080 @ 25 fps (BGRA)" if fmt
                  else "NDI: No video frame received, using defaults (1920x1080 @25fps)")
+    # Without a frame the VC's frame info is provisional: its fit basis is
+    # "invented", never "dims" (VideoLayer::applyOutputFit).
+    basis = "dims 1920x1080" if fmt else "invented"
     lines += [f"Async load complete: ndi://{source} (cue ID: {layer})",
-              f"fit_output: {layer} -> HDMI-A-1 fill pos -2880,0 scale 1,1 (dims 1920x1080)"]
+              f"fit_output: {layer} -> HDMI-A-1 fill pos -2880,0 scale 1,1 ({basis})"]
     return lines
 
 
@@ -244,6 +247,8 @@ def _preview(tmp_path, *, resolve=None, routes=None, engine=None, auto=False):
     pv = NdiPreview(bridge, journal=_FakeJournal(),
                     osc_send=lambda a, port, path, args: sent.append((a, path, args)),
                     resolver=resolver, router=router)
+    # No background probing in unit tests: health tests drive run_cycle().
+    pv.health.touch = lambda: None
     return pv, sent
 
 
@@ -303,6 +308,9 @@ class _FakeJournal:
 
     async def version(self, target):
         return "0.1.2-8"
+
+    def remote_files(self, ip):
+        return []
 
 
 @pytest.fixture(autouse=True)
@@ -381,8 +389,14 @@ async def test_show_without_wait_returns_pending_and_status_follows(tmp_path):
     st = await pv.status()
     assert st["previews"][0]["confirm"] == "no_frames_yet"
     assert st["vc_versions"] == {"127.0.0.1": "0.1.2-8"}
+    # rev 12.2 (M3): an "updated" line has no layer id — on its own it
+    # changes nothing; this layer's re-fit with real dims is what counts.
     pv.journal.script += ["NDI: Source format updated 1280x720 @ 50 fps (was invented)"]
-    assert (await pv.status())["previews"][0]["confirm"] == "frames"
+    assert (await pv.status())["previews"][0]["confirm"] == "no_frames_yet"
+    pv.journal.script += ["fit_output: ndi-preview-HDMI-A-1 -> HDMI-A-1 native pos -1920,0 "
+                          "scale 0.666667,0.666667 (dims 1280x720)"]
+    p = (await pv.status())["previews"][0]
+    assert p["confirm"] == "frames" and p["source_size"] == {"w": 1280, "h": 720}
     pv.journal.script += ["Reset: removing all layers, cancelling loads, resetting master"]
     assert (await pv.status())["previews"][0]["wiped"] is True
 

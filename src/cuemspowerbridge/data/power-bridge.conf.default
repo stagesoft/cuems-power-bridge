@@ -142,3 +142,19 @@ projector_command_timeout_s = 5          # per-command network timeout (> 0)
 #   projector.1.escvp_port      = 3629         # optional; ESC/VP.net default 3629
 # Requires "Command Communication" (ESC/VP.net) enabled on each projector's
 # network menu — distinct from the PJLink toggle.
+
+# ---------------------------------------------------------------------------
+# NDI preview for montajes (/ndi/*, the page at /ndi/). All optional.
+#
+#   ndi_journal_stale_s = 600   # a node whose uploaded journal is older than
+#                               # this (s) is "journal sin llegar": previews to
+#                               # it are refused (503 journal_stale), since the
+#                               # route and the confirmation both come from it.
+#   ndi_hosts           = 10.20.0.15, 10.20.0.16
+#                               # senders on ANOTHER subnet: the controller's
+#                               # videocomposer asks these IPs directly (mDNS
+#                               # does not cross routers). Up to 8; more can be
+#                               # added from the page. Needs a videocomposer with
+#                               # "ips=" in its discovery lines (after 0.1.2-7).
+#   ndi_vc_osc_port     = 7000  # the videocomposers' OSC port
+#   ndi_mappings_path   = /etc/cuems/default_mappings.xml   # screen names

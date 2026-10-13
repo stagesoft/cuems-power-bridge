@@ -67,6 +67,16 @@ ul.sources input { margin-top: 4px; width: 20px; height: 20px; flex: none; }
 .card { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 12px;
   display: grid; gap: 6px; }
 .card.absent { background: var(--absent); }
+.card.down { border-color: var(--bad); }
+.health { color: var(--bad); margin: 0; }
+input[type=text] { font: inherit; padding: 8px; min-height: 44px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--fg); flex: 1 1 180px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--card); }
+.chip button { min-height: 0; padding: 2px 8px; }
+.chip button.pick { border-color: var(--accent); color: var(--accent); }
+.chip button.pick.on { background: var(--accent); color: var(--accent-fg); }
+ul.sources label.on { border-color: var(--accent); }
 .now { margin: 0; overflow-wrap: anywhere; }
 .now.frames { color: var(--ok); }
 .now.failed { color: var(--bad); }
@@ -84,6 +94,13 @@ footer { margin-top: 32px; }
     <button id="refresh" type="button">Buscar fuentes</button>
     <span id="sources-msg" class="muted" aria-live="polite"></span>
   </div>
+  <div class="row msg">
+    <input id="host-ip" type="text" inputmode="decimal" autocomplete="off"
+           aria-label="IP de un equipo en otra red" placeholder="IP de un equipo en otra red">
+    <button id="host-add" type="button">Añadir equipo por IP</button>
+    <span id="hosts-msg" class="muted" aria-live="polite"></span>
+  </div>
+  <div id="hosts" class="row msg"></div>
   <ul id="sources" class="sources msg" role="radiogroup" aria-label="Fuentes NDI"></ul>
 
   <h2>Pantallas</h2>
@@ -139,6 +156,15 @@ const REASONS = {
   source_not_found: "Esa fuente ya no se ve",
   stopped_or_reset_during_load: "Se quitó o se reinició durante la carga",
   unknown_output: "Esa máquina no tiene esa salida",
+  machine_unreachable: "La máquina no responde en la red",
+  journal_stale: "La máquina está en la red pero su journal no llega: no se puede previsualizar ni confirmar",
+  no_vc_reply: "El videocomposer no contesta",
+  vc_down: "El videocomposer está parado",
+  bad_ip: "Eso no es la IP de un equipo (IPv4, p. ej. 10.20.0.15)",
+  too_many_hosts: "Ya hay 8 equipos añadidos por IP",
+  host_from_config: "Esa IP viene de la configuración del bridge y no se quita desde aquí",
+  hosts_need_controller_vc: "El videocomposer del controller no sabe buscar por IP: hay que actualizarlo",
+  source_unreachable: "El controller no llega al puerto de vídeo del emisor",
   network: "Sin conexión con el bridge",
   bad_reply: "Respuesta del bridge ilegible"
 };
@@ -189,6 +215,39 @@ function say(reason) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// "1920x1200@59.9502" -> "1920×1200 · 59.95 Hz". Two decimals: one would
+// round 59.95 up to "60.0" and hide that it is not a 60 Hz output.
+function fmtHz(hz) {
+  return Number.isInteger(hz) ? String(hz) : String(Math.round(hz * 100) / 100);
+}
+
+function fmtMode(m) {
+  const r = /^(\d+)x(\d+)@([\d.]+)$/.exec(m || "");
+  if (!r) { return ""; }
+  return r[1] + "×" + r[2] + " · " + fmtHz(Number(r[3])) + " Hz";
+}
+
+// {w, h} + fps -> "1920×1080 · 29.97 fps" (fps only when known)
+function fmtSize(size, fps) {
+  if (!size) { return ""; }
+  let t = size.w + "×" + size.h;
+  if (typeof fps === "number" && fps > 0) {
+    t += " · " + (Number.isInteger(fps) ? String(fps) : String(Math.round(fps * 100) / 100)) + " fps";
+  }
+  return t;
+}
+
+// A refusal with the machine it is about, and how old its journal is.
+function sayErr(data) {
+  let t = say(data.reason);
+  if (data.machine) { t = data.machine + ": " + t; }
+  if (data.reason === "bad_ip" && data.ip) { t += " — " + data.ip; }
+  if (data.reason === "journal_stale" && data.journal_age_s) {
+    t += " (desde hace " + Math.round(data.journal_age_s / 60) + " min)";
+  }
+  return t;
+}
 
 async function api(method, path, body, retry = true) {
   const headers = {};   // no token: /ndi/* is open on the internal network (D30)
@@ -284,6 +343,7 @@ async function loadSources() {
   }
   if (!selected && sourceList.length === 1) { selected = sourceList[0].name; }
   renderSources();
+  renderHosts();
   updateCards();
 }
 
@@ -297,15 +357,93 @@ function renderSources() {
     radio.type = "radio";
     radio.name = "source";
     radio.checked = s.name === selected;
-    radio.addEventListener("change", () => { selected = s.name; updateCards(); });
+    radio.addEventListener("change", () => selectSource(s.name));
+    if (s.name === selected) { label.classList.add("on"); }
     const text = el("span");
     text.append(el("span", "name", s.name));
     text.append(el("br"));
-    text.append(el("span", "muted", "visto por: " + (s.seen_by || []).join(", ")));
+    let seen = "visto por: " + (s.seen_by || []).join(", ");
+    if (s.size) { seen += " · " + fmtSize(s.size, s.size.fps); }   // only while on some screen
+    if (s.via_ip) { seen += " · por IP"; }
+    text.append(el("span", "muted", seen));
     label.append(radio, text);
     li.append(label);
     ul.append(li);
   }
+}
+
+// ---------------- hosts by IP (rev 12.2 §3.10) ----------------
+
+let hostList = [];
+const hostNotes = new Map();   // ip -> what its last search gave
+
+async function loadHosts() {
+  const d = await api("GET", "hosts");
+  if (d.ok) { hostList = d.hosts || []; renderHosts(); }
+}
+
+function renderHosts() {
+  const box = $("hosts");
+  box.replaceChildren();
+  for (const h of hostList) {
+    const chip = el("span", "chip");
+    chip.append(el("span", null, h.ip));
+    if (h.from === "config") {
+      chip.append(el("span", "muted", "configuración"));
+    } else {
+      const x = el("button", null, "Quitar");
+      x.type = "button";
+      x.addEventListener("click", () => removeHost(h.ip));
+      chip.append(x);
+    }
+    // The sources found at this IP, to pick right here (Ion 2026-10-13: an
+    // added IP must lead to its source, not to a second list).
+    const here = sourceList.filter((s) => s.via_ip && s.ip === h.ip);
+    for (const s of here) {
+      const pick = el("button", "pick" + (s.name === selected ? " on" : ""), s.name);
+      pick.type = "button";
+      pick.title = "Elegir esta fuente";
+      pick.addEventListener("click", () => selectSource(s.name));
+      chip.append(pick);
+    }
+    const note = here.length ? "" : hostNotes.get(h.ip);
+    if (note) { chip.append(el("span", "muted", note)); }
+    box.append(chip);
+  }
+}
+
+function selectSource(name) {
+  selected = name;
+  renderSources();
+  renderHosts();
+  updateCards();
+}
+
+async function addHost() {
+  const ip = $("host-ip").value.trim();
+  if (!ip || blocked !== null) { return; }
+  $("host-add").disabled = true;
+  $("hosts-msg").textContent = "Buscando en " + ip + "…";
+  const d = await api("POST", "hosts", { ip });
+  $("host-add").disabled = false;
+  if (!d.ok) { $("hosts-msg").textContent = sayErr(d); return; }
+  $("hosts-msg").textContent = "";
+  $("host-ip").value = "";
+  hostList = d.hosts || [];
+  const n = (d.found || []).length;
+  hostNotes.set(d.ip, n ? n + (n === 1 ? " fuente" : " fuentes")
+    : ((d.found_by_ip || []).length ? "" : "sin fuentes NDI o no se llega"));
+  renderHosts();
+  loadSources();
+}
+
+async function removeHost(ip) {
+  const d = await api("POST", "hosts", { ip, remove: true });
+  if (!d.ok) { $("hosts-msg").textContent = sayErr(d); return; }
+  hostList = d.hosts || [];
+  hostNotes.delete(ip);
+  renderHosts();
+  loadSources();
 }
 
 // ---------------- screens ----------------
@@ -320,7 +458,8 @@ async function loadOutputs() {
   const list = data.outputs || [];
   const same = list.length === screenList.length &&
     list.every((s, i) => s.alias === screenList[i].alias && s.present === screenList[i].present &&
-                         s.name === screenList[i].name);
+                         s.name === screenList[i].name && s.mode === screenList[i].mode &&
+                         s.region === screenList[i].region);
   screenList = list;
   if (!same) { buildCards(); }
   updateCards();
@@ -334,6 +473,9 @@ function buildCards() {
     const card = el("div", "card");
     const title = el("h3", null, sc.name || sc.alias);
     const sub = el("span", "muted", sc.name ? sc.alias : sc.machine + " · sin nombre en la UI");
+    const modeLine = el("span", "muted", fmtMode(sc.mode));
+    const health = el("p", "health");
+    health.setAttribute("aria-live", "polite");
     const now = el("p", "now");
     now.setAttribute("aria-live", "polite");
     const err = el("p", "now err");
@@ -346,13 +488,15 @@ function buildCards() {
     stop.type = "button";
     stop.addEventListener("click", () => doStop(sc.alias));
     row.append(show, stop);
-    card.append(title, sub, now, err, row);
+    card.append(title, sub);
+    if (sc.mode) { card.append(modeLine); }
+    card.append(health, now, err, row);
     if (sc.present === false) {
       card.classList.add("absent");
       sub.textContent += " · no conectada";
     }
     box.append(card);
-    cards.set(sc.alias, { sc, card, now, err, show, stop });
+    cards.set(sc.alias, { sc, card, now, err, show, stop, health });
   }
 }
 
@@ -361,9 +505,26 @@ function previewFor(alias) {
   return list.find((p) => p.screen && p.screen.alias === alias);
 }
 
+// The machine behind a screen, from /ndi/status (refreshed every 3 s).
+function healthNote(sc) {
+  const ms = (lastStatus && lastStatus.machines) || {};
+  const h = ms[sc.machine];
+  if (!h) { return ""; }
+  if (h.state === "unreachable") { return sc.machine + " no responde en la red"; }
+  if (h.state === "vc_down") { return "el videocomposer de " + sc.machine + " está parado"; }
+  if (h.journal_stale) {
+    return "el journal de " + sc.machine + " no llega desde hace " +
+      Math.round((h.journal_age_s || 0) / 60) + " min";
+  }
+  return "";
+}
+
 function updateCards() {
   for (const [alias, c] of cards) {
     const p = previewFor(alias);
+    const note = healthNote(c.sc);
+    c.health.textContent = note;
+    c.card.classList.toggle("down", note !== "");
     let text = "—";
     let cls = "now";
     if (p && !p.stopped) {
@@ -371,6 +532,10 @@ function updateCards() {
         text = p.source + " — borrada por un reset";
       } else {
         text = p.source + " — " + (STATES[p.confirm] || p.confirm);
+        if (p.source_size) { text += " · " + fmtSize(p.source_size, p.source_fps); }
+        if (typeof p.scale === "number" && Math.abs(p.scale - 1) > 0.005) {
+          text += " · escalada ×" + p.scale.toFixed(2);
+        }
         if (p.route === "relay") { text += " · vía controller"; }
         if (p.confirm === "frames") { cls += " frames"; }
         if (p.confirm === "failed" || p.confirm === "unconfirmed") {
@@ -383,8 +548,9 @@ function updateCards() {
     c.now.className = cls;
     c.err.textContent = errors.get(alias) || "";
     const busy = inflight.has(alias);
-    c.show.disabled = busy || blocked !== null || !selected || c.sc.present === false;
-    c.show.title = blocked ? (BLOCKED[blocked] || say(blocked)) : (!selected ? "Elige una fuente" : "");
+    c.show.disabled = busy || blocked !== null || !selected || c.sc.present === false || note !== "";
+    c.show.title = blocked ? (BLOCKED[blocked] || say(blocked))
+      : (note || (!selected ? "Elige una fuente" : ""));
     c.stop.disabled = busy || !alias;
   }
 }
@@ -401,7 +567,7 @@ async function doShow(alias) {
   updateCards();
   const data = await api("POST", "preview", { source: selected, output: alias, mode: mode() });
   inflight.delete(alias);
-  if (!data.ok) { errors.set(alias, say(data.reason)); }
+  if (!data.ok) { errors.set(alias, sayErr(data)); }
   updateCards();
   pollStatus();
 }
@@ -413,7 +579,7 @@ async function doStop(alias) {
   updateCards();
   const data = await api("POST", "stop", { output: alias });
   inflight.delete(alias);
-  if (!data.ok) { errors.set(alias, say(data.reason)); }
+  if (!data.ok) { errors.set(alias, sayErr(data)); }
   updateCards();
   pollStatus();
 }
@@ -442,6 +608,7 @@ function startTimers() {
 
 async function refreshAll() {
   await pollStatus();
+  await loadHosts();
   await loadOutputs();
   await loadSources();
 }
@@ -456,6 +623,8 @@ document.addEventListener("visibilitychange", () => {
 });
 
 $("refresh").addEventListener("click", loadSources);
+$("host-add").addEventListener("click", addHost);
+$("host-ip").addEventListener("keydown", (e) => { if (e.key === "Enter") { addHost(); } });
 $("stop-all").addEventListener("click", doStopAll);
 
 refreshAll();
