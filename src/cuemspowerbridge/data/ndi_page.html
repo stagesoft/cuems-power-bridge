@@ -216,12 +216,16 @@ function say(reason) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// "1920x1080@59.79" -> "1920×1080 · 59.8 Hz"
+// "1920x1200@59.9502" -> "1920×1200 · 59.95 Hz". Two decimals: one would
+// round 59.95 up to "60.0" and hide that it is not a 60 Hz output.
+function fmtHz(hz) {
+  return Number.isInteger(hz) ? String(hz) : String(Math.round(hz * 100) / 100);
+}
+
 function fmtMode(m) {
   const r = /^(\d+)x(\d+)@([\d.]+)$/.exec(m || "");
   if (!r) { return ""; }
-  const hz = Number(r[3]);
-  return r[1] + "×" + r[2] + " · " + (Number.isInteger(hz) ? String(hz) : hz.toFixed(1)) + " Hz";
+  return r[1] + "×" + r[2] + " · " + fmtHz(Number(r[3])) + " Hz";
 }
 
 // {w, h} + fps -> "1920×1080 · 29.97 fps" (fps only when known)
