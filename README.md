@@ -1254,6 +1254,15 @@ Mostrar is disabled; one whose journal has stopped arriving is marked too (the p
 neither be routed nor confirmed without it — `ndi_journal_stale_s` in `power-bridge.conf`,
 default 600 s).
 
+**A sender on another subnet.** NDI finds sources by mDNS, which does not cross routers. Type
+the sender's IP in "Añadir equipo por IP" (or list it as `ndi_hosts` in `power-bridge.conf`):
+the controller's videocomposer then asks that machine directly, and its sources appear marked
+"por IP". The controller shows them by address; the nodes get them through the controller's
+relay. Requirements: the controller must have a route to that subnet; the sender must accept
+TCP **5960** (NDI's messaging port, used to list its sources) and its stream ports (5961 and
+up, or the range its NDI configuration fixes); and the controller's videocomposer must be
+newer than 0.1.2-7 (otherwise the page says it must be updated).
+
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).
 
