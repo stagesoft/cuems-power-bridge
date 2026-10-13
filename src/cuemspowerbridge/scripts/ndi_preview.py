@@ -67,6 +67,12 @@ def _screen(sc: dict) -> str:
     return f"{name}({sc['alias']})"
 
 
+def _size(size: dict | None, fps: float | None = None) -> str:
+    if not size:
+        return ""
+    return f"{size['w']}x{size['h']}" + (f" @ {fps:g} fps" if fps else "")
+
+
 def _print(status: int, body: dict, cmd: str) -> int:
     if not body.get("ok", False):
         reason = body.get("reason", "error")
@@ -76,13 +82,21 @@ def _print(status: int, body: dict, cmd: str) -> int:
         return 1
     if cmd == "sources":
         for src in body.get("sources", []):
-            print(f"  #{src['n']}  {src['name']}   [seen by: {', '.join(src['seen_by'])}]")
+            size = src.get("size")
+            print(f"  #{src['n']}  {src['name']}   [seen by: {', '.join(src['seen_by'])}]"
+                  + (f"  {_size(size, size.get('fps'))}" if size else ""))
         if body.get("hint"):
             print(f"  (none) {body['hint']}")
     elif cmd == "outputs":
         for sc in body.get("outputs", []):
             flag = "" if sc.get("present") in (None, True) else "   (not driven now)"
-            print(f"  {sc['n']:>2}  {sc.get('name') or '-':<22} {sc['alias']}{flag}")
+            ms = sc.get("machine_state") or {}
+            if ms.get("state") in ("unreachable", "vc_down"):
+                flag += f"   ({sc.get('machine')} {ms['state']})"
+            elif ms.get("journal_stale"):
+                flag += f"   ({sc.get('machine')} journal {ms.get('journal_age_s')} s old)"
+            print(f"  {sc['n']:>2}  {sc.get('name') or '-':<22} {sc['alias']:<20} "
+                  f"{sc.get('mode') or '':<14}{flag}")
     elif cmd == "show":
         line = f"{body.get('source')} -> {_screen(body['screen'])}: {body.get('confirm')}"
         print(line + (f" ({body['reason']})" if body.get("reason") else ""))
@@ -104,8 +118,18 @@ def _print(status: int, body: dict, cmd: str) -> int:
         for p in previews:
             state = p["confirm"] + (" WIPED (project loaded)" if p.get("wiped") else "") + \
                 (" stopped" if p.get("stopped") else "")
+            extra = _size(p.get("source_size"), p.get("source_fps"))
+            if p.get("scale") not in (None, 1, 1.0):
+                extra += f" scaled x{p['scale']:g}"
+            if p.get("reason"):
+                state += f" ({p['reason']})"
             print(f"  {_screen(p['screen'])}: {p['source']} [{state}]"
+                  + (f" {extra}" if extra else "")
                   + (" via controller" if p.get("route") == "relay" else ""))
+        for name, m in sorted((body.get("machines") or {}).items()):
+            if m.get("state") != "alive" or m.get("journal_stale"):
+                print(f"  machine {name}: {m.get('state')}"
+                      + (f", journal {m.get('journal_age_s')} s old" if m.get("journal_stale") else ""))
     else:
         print(json.dumps(body, indent=2))
     return 0

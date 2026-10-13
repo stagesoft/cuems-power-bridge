@@ -107,6 +107,12 @@ def test_every_reason_token_has_spanish_text():
     assert not missing, f"reasons without Spanish text in the page: {sorted(missing)}"
 
 
+def test_rev12_reason_sentinels():
+    # Tokens the regex above cannot see (a ternary, a computed reason).
+    for token in ("no_vc_reply", "machine_unreachable", "journal_stale", "vc_down"):
+        assert token in _table("REASONS"), token
+
+
 def test_every_preview_state_has_spanish_text():
     src = (PKG / "ndi_preview.py").read_text()
     states = set(re.findall(r'state\s*=\s*"([a-z_-]+)"', src))

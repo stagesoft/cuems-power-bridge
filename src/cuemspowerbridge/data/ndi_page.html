@@ -67,6 +67,8 @@ ul.sources input { margin-top: 4px; width: 20px; height: 20px; flex: none; }
 .card { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 12px;
   display: grid; gap: 6px; }
 .card.absent { background: var(--absent); }
+.card.down { border-color: var(--bad); }
+.health { color: var(--bad); margin: 0; }
 .now { margin: 0; overflow-wrap: anywhere; }
 .now.frames { color: var(--ok); }
 .now.failed { color: var(--bad); }
@@ -139,6 +141,10 @@ const REASONS = {
   source_not_found: "Esa fuente ya no se ve",
   stopped_or_reset_during_load: "Se quitó o se reinició durante la carga",
   unknown_output: "Esa máquina no tiene esa salida",
+  machine_unreachable: "La máquina no responde en la red",
+  journal_stale: "La máquina está en la red pero su journal no llega: no se puede previsualizar ni confirmar",
+  no_vc_reply: "El videocomposer no contesta",
+  vc_down: "El videocomposer está parado",
   network: "Sin conexión con el bridge",
   bad_reply: "Respuesta del bridge ilegible"
 };
@@ -189,6 +195,34 @@ function say(reason) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// "1920x1080@59.79" -> "1920×1080 · 59.8 Hz"
+function fmtMode(m) {
+  const r = /^(\d+)x(\d+)@([\d.]+)$/.exec(m || "");
+  if (!r) { return ""; }
+  const hz = Number(r[3]);
+  return r[1] + "×" + r[2] + " · " + (Number.isInteger(hz) ? String(hz) : hz.toFixed(1)) + " Hz";
+}
+
+// {w, h} + fps -> "1920×1080 · 29.97 fps" (fps only when known)
+function fmtSize(size, fps) {
+  if (!size) { return ""; }
+  let t = size.w + "×" + size.h;
+  if (typeof fps === "number" && fps > 0) {
+    t += " · " + (Number.isInteger(fps) ? String(fps) : String(Math.round(fps * 100) / 100)) + " fps";
+  }
+  return t;
+}
+
+// A refusal with the machine it is about, and how old its journal is.
+function sayErr(data) {
+  let t = say(data.reason);
+  if (data.machine) { t = data.machine + ": " + t; }
+  if (data.reason === "journal_stale" && data.journal_age_s) {
+    t += " (desde hace " + Math.round(data.journal_age_s / 60) + " min)";
+  }
+  return t;
+}
 
 async function api(method, path, body, retry = true) {
   const headers = {};   // no token: /ndi/* is open on the internal network (D30)
@@ -301,7 +335,9 @@ function renderSources() {
     const text = el("span");
     text.append(el("span", "name", s.name));
     text.append(el("br"));
-    text.append(el("span", "muted", "visto por: " + (s.seen_by || []).join(", ")));
+    let seen = "visto por: " + (s.seen_by || []).join(", ");
+    if (s.size) { seen += " · " + fmtSize(s.size, s.size.fps); }   // only while on some screen
+    text.append(el("span", "muted", seen));
     label.append(radio, text);
     li.append(label);
     ul.append(li);
@@ -320,7 +356,8 @@ async function loadOutputs() {
   const list = data.outputs || [];
   const same = list.length === screenList.length &&
     list.every((s, i) => s.alias === screenList[i].alias && s.present === screenList[i].present &&
-                         s.name === screenList[i].name);
+                         s.name === screenList[i].name && s.mode === screenList[i].mode &&
+                         s.region === screenList[i].region);
   screenList = list;
   if (!same) { buildCards(); }
   updateCards();
@@ -334,6 +371,9 @@ function buildCards() {
     const card = el("div", "card");
     const title = el("h3", null, sc.name || sc.alias);
     const sub = el("span", "muted", sc.name ? sc.alias : sc.machine + " · sin nombre en la UI");
+    const modeLine = el("span", "muted", fmtMode(sc.mode));
+    const health = el("p", "health");
+    health.setAttribute("aria-live", "polite");
     const now = el("p", "now");
     now.setAttribute("aria-live", "polite");
     const err = el("p", "now err");
@@ -346,13 +386,15 @@ function buildCards() {
     stop.type = "button";
     stop.addEventListener("click", () => doStop(sc.alias));
     row.append(show, stop);
-    card.append(title, sub, now, err, row);
+    card.append(title, sub);
+    if (sc.mode) { card.append(modeLine); }
+    card.append(health, now, err, row);
     if (sc.present === false) {
       card.classList.add("absent");
       sub.textContent += " · no conectada";
     }
     box.append(card);
-    cards.set(sc.alias, { sc, card, now, err, show, stop });
+    cards.set(sc.alias, { sc, card, now, err, show, stop, health });
   }
 }
 
@@ -361,9 +403,26 @@ function previewFor(alias) {
   return list.find((p) => p.screen && p.screen.alias === alias);
 }
 
+// The machine behind a screen, from /ndi/status (refreshed every 3 s).
+function healthNote(sc) {
+  const ms = (lastStatus && lastStatus.machines) || {};
+  const h = ms[sc.machine];
+  if (!h) { return ""; }
+  if (h.state === "unreachable") { return sc.machine + " no responde en la red"; }
+  if (h.state === "vc_down") { return "el videocomposer de " + sc.machine + " está parado"; }
+  if (h.journal_stale) {
+    return "el journal de " + sc.machine + " no llega desde hace " +
+      Math.round((h.journal_age_s || 0) / 60) + " min";
+  }
+  return "";
+}
+
 function updateCards() {
   for (const [alias, c] of cards) {
     const p = previewFor(alias);
+    const note = healthNote(c.sc);
+    c.health.textContent = note;
+    c.card.classList.toggle("down", note !== "");
     let text = "—";
     let cls = "now";
     if (p && !p.stopped) {
@@ -371,6 +430,10 @@ function updateCards() {
         text = p.source + " — borrada por un reset";
       } else {
         text = p.source + " — " + (STATES[p.confirm] || p.confirm);
+        if (p.source_size) { text += " · " + fmtSize(p.source_size, p.source_fps); }
+        if (typeof p.scale === "number" && Math.abs(p.scale - 1) > 0.005) {
+          text += " · escalada ×" + p.scale.toFixed(2);
+        }
         if (p.route === "relay") { text += " · vía controller"; }
         if (p.confirm === "frames") { cls += " frames"; }
         if (p.confirm === "failed" || p.confirm === "unconfirmed") {
@@ -383,8 +446,9 @@ function updateCards() {
     c.now.className = cls;
     c.err.textContent = errors.get(alias) || "";
     const busy = inflight.has(alias);
-    c.show.disabled = busy || blocked !== null || !selected || c.sc.present === false;
-    c.show.title = blocked ? (BLOCKED[blocked] || say(blocked)) : (!selected ? "Elige una fuente" : "");
+    c.show.disabled = busy || blocked !== null || !selected || c.sc.present === false || note !== "";
+    c.show.title = blocked ? (BLOCKED[blocked] || say(blocked))
+      : (note || (!selected ? "Elige una fuente" : ""));
     c.stop.disabled = busy || !alias;
   }
 }
@@ -401,7 +465,7 @@ async function doShow(alias) {
   updateCards();
   const data = await api("POST", "preview", { source: selected, output: alias, mode: mode() });
   inflight.delete(alias);
-  if (!data.ok) { errors.set(alias, say(data.reason)); }
+  if (!data.ok) { errors.set(alias, sayErr(data)); }
   updateCards();
   pollStatus();
 }
@@ -413,7 +477,7 @@ async function doStop(alias) {
   updateCards();
   const data = await api("POST", "stop", { output: alias });
   inflight.delete(alias);
-  if (!data.ok) { errors.set(alias, say(data.reason)); }
+  if (!data.ok) { errors.set(alias, sayErr(data)); }
   updateCards();
   pollStatus();
 }

@@ -44,6 +44,8 @@ class Screen:
     target: str          # what resolve_target() takes: "local" or the node's role_id/label
     connector: str       # DRM connector, e.g. HDMI-A-1
     present: bool | None = None   # the VC drives it (None = not checked)
+    mode: str = ""                # physical mode from the VC's output/list, "1920x1080@60"
+    region: str = ""              # its canvas rectangle "x,y,w,h" (rev 12)
 
     @property
     def layer_id(self) -> str:
@@ -52,7 +54,16 @@ class Screen:
 
     def public(self) -> dict:
         return {"n": self.n, "name": self.name, "alias": self.alias, "machine": self.machine,
-                "connector": self.connector, "present": self.present}
+                "connector": self.connector, "present": self.present, "mode": self.mode,
+                "region": self.region}
+
+    def region_size(self) -> tuple[int, int] | None:
+        """(width, height) of the screen's canvas region, if known."""
+        try:
+            _, _, w, h = (int(v) for v in self.region.split(","))
+        except ValueError:
+            return None
+        return (w, h) if w > 0 and h > 0 else None
 
 
 def _local(tag: str) -> str:
@@ -103,11 +114,13 @@ def video_outputs(mappings_path: str) -> dict[str, list[tuple[str, str]]]:
 
 
 def catalogue(mappings_path: str, network_map_path: str,
-              live: dict[str, list[str]] | None = None) -> list[Screen]:
+              live: dict[str, list[str]] | None = None,
+              info: dict[str, dict[str, dict]] | None = None) -> list[Screen]:
     """Every screen of the cluster: the controller first, then nodes by role,
     each machine's connectors in order. `live` = {target: connectors the VC
     drives} when known: marks absent ones and adds connectors the mappings
-    omit (no UI name)."""
+    omit (no UI name). `info` = {target: {connector: {"mode", "region"}}}
+    from the VCs' last output/list (rev 12), live or cached."""
     nodes = network_map.parse(network_map_path)
     outs = video_outputs(mappings_path)
     machines = []
@@ -127,10 +140,12 @@ def catalogue(mappings_path: str, network_map_path: str,
         if drives is not None:
             known = {c for _, c in rows}
             rows += [("", c) for c in sorted(drives) if c not in known]
+        known_info = (info or {}).get(target, {})
         for name, connector in rows:
             present = None if drives is None else connector in drives
+            ci = known_info.get(connector, {})
             screens.append(Screen(0, name, f"{machine}_{connector}", machine, target, connector,
-                                  present))
+                                  present, ci.get("mode", ""), ci.get("region", "")))
     for i, sc in enumerate(screens, 1):
         sc.n = i
     return screens

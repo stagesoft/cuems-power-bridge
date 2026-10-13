@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterable
 from aiohttp import web
 
 from . import network_map
+from .ndi_health import HealthMonitor
 from .engine_state import UNKNOWN
 from .ndi_relay import Relay, RelayError
 from .ndi_screens import DEFAULT_MAPPINGS, Screen, ScreenError
@@ -58,6 +59,7 @@ RESOLVE_TIMEOUT_S = 2.0
 LOAD_RECHECK_S = 1.0
 POLL_S = 0.5
 STATUS_CACHE_S = 1.0     # rev 11: pages poll status; one computation per second
+JOURNAL_STALE_S = 600    # rev 12.2 (D33): a node journal older than this cannot route a preview
 PAGE_FILE = "ndi_page.html"
 FIT_MODES = ("fill", "native")
 
@@ -91,6 +93,9 @@ _FIT_RE = re.compile(
     r"\((?P<basis>[^)]*)\)$"
 )
 _FIT_UNKNOWN_RE = re.compile(r"^fit_output: unknown output '([^']*)' \(have: (.*)\)$")
+# Open-time format line (rev 12.2: fps only; sizes come from the per-layer fit line).
+_FORMAT_OPEN_RE = re.compile(r"^NDI: Source format: (\d+)x(\d+) @ ([\d.]+) fps")
+_DIMS_RE = re.compile(r"^dims (\d+)x(\d+)$")
 
 
 @dataclass
@@ -158,6 +163,25 @@ class Verdict:
     reason: str | None = None
     fit: dict | None = None
     unknown_output: str | None = None
+    fps: float | None = None       # from the open-time format line (rev 12.2)
+    detail: str | None = None      # English hint, kept off the page (rev 12.2)
+
+
+def fit_size(fit: dict | None) -> tuple[int, int] | None:
+    """(w, h) of the source from a fit line's basis "dims WxH"; None for
+    "fallback"/"invented" (rev 12.2: never show invented dimensions)."""
+    m = _DIMS_RE.match((fit or {}).get("basis", ""))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def pixel_scale(size: tuple[int, int] | None, region: tuple[int, int] | None,
+                mode: str) -> float | None:
+    """Screen pixels per source pixel, as the VC places it (OutputFit.h):
+    fill = min(rw/w, rh/h); native = that, but never above 1."""
+    if not size or not region:
+        return None
+    f = min(region[0] / size[0], region[1] / size[1])
+    return round(f if mode == "fill" else min(1.0, f), 3)
 
 
 def classify(messages: list[str], source: str, filepath: str | None = None,
@@ -175,8 +199,11 @@ def classify(messages: list[str], source: str, filepath: str | None = None,
     format_known = False
     no_frame = False
     for msg in messages:
-        if msg.startswith("NDI: Source format: ") or msg.startswith("NDI: Source format updated "):
+        m = _FORMAT_OPEN_RE.match(msg)
+        if m:
             format_known = True
+            if v.fps is None:
+                v.fps = float(m.group(3))
         elif msg.startswith("NDI: No video frame received"):
             no_frame = True
         elif msg == f"NDI: Source not found: {source}":
@@ -188,6 +215,8 @@ def classify(messages: list[str], source: str, filepath: str | None = None,
             v.fit = {"output": m.group("region"), "mode": m.group("mode"),
                      "pos": [int(m.group("x")), int(m.group("y"))],
                      "scale": float(m.group("sx")), "basis": m.group("basis")}
+            if fit_size(v.fit):
+                format_known = True
         m = _FIT_UNKNOWN_RE.match(msg)
         if m:
             v.unknown_output = m.group(1)
@@ -509,8 +538,13 @@ class _Request:
                "route": "relay" if self.relay else "direct",
                "machine_address": self.target.address,
                "confirm": self.verdict.state, "reason": self.verdict.reason,
+               "detail": self.verdict.detail,
                "fit": self.verdict.fit, "raced_by_load": self.raced_by_load,
                "wiped": self.wiped, "stopped": self.stopped}
+        size = fit_size(self.verdict.fit)
+        out["source_size"] = {"w": size[0], "h": size[1]} if size else None
+        out["source_fps"] = self.verdict.fps
+        out["scale"] = pixel_scale(size, self.screen.region_size(), self.mode)
         if self.relay is not None:
             out["relay"] = self.relay.stats(with_upstream)
         return out
@@ -522,8 +556,8 @@ class SeenSource:
     name: str
     seen_by: dict[str, str]      # machine -> "ip:port" ("" when unknown)
 
-    def public(self, n: int) -> dict:
-        return {"n": n, "name": self.name, "seen_by": sorted(self.seen_by)}
+    def public(self, n: int, size: dict | None = None) -> dict:
+        return {"n": n, "name": self.name, "seen_by": sorted(self.seen_by), "size": size}
 
 
 class NdiPreview:
@@ -552,6 +586,15 @@ class NdiPreview:
         self._status_tasks: dict[bool, asyncio.Task] = {}
         self._page = load_page()
         self.vc_port = int(self.cfg.extras.get("ndi_vc_osc_port", VC_OSC_PORT))
+        self._outputs_info: dict[str, dict[str, dict]] = {}   # machine → connector → mode/region
+        try:
+            self.journal_stale_s = int(self.cfg.extras.get("ndi_journal_stale_s", JOURNAL_STALE_S))
+        except ValueError:
+            log.warning("ndi-preview: ndi_journal_stale_s is not an integer; using %d",
+                        JOURNAL_STALE_S)
+            self.journal_stale_s = JOURNAL_STALE_S
+        self.health = HealthMonitor(self._machine_ips, self._journal_age,
+                                    lambda: guard(self.bridge.engine, False) is not None)
 
     # ---------------- plumbing ----------------
 
@@ -605,6 +648,53 @@ class NdiPreview:
         return ["local"] + [n.role_id or n.alias or n.hostname or n.uuid for n in nodes
                             if n.node_type == "NodeType.slave"]
 
+    async def _machine_ips(self) -> list[tuple[str, str | None]]:
+        """(label, <ip> from network_map) per machine, for the health monitor.
+        Never an avahi answer: role_ids repeat across clusters (M-B)."""
+        loop = asyncio.get_running_loop()
+        nodes = await loop.run_in_executor(None, network_map.parse, self.cfg.network_map_path)
+        return [("local", None)] + [(n.role_id or n.alias or n.hostname or n.uuid, n.ip or None)
+                                    for n in nodes if n.node_type == "NodeType.slave"]
+
+    def _journal_age(self, ip: str) -> float | None:
+        """Seconds since that node's uploaded journal was last written (the
+        newest of its per-IP files; the controller's clock, so no skew)."""
+        newest = None
+        for f in self.journal.remote_files(ip):
+            try:
+                mt = os.stat(f).st_mtime
+            except OSError:
+                continue
+            newest = mt if newest is None else max(newest, mt)
+        return None if newest is None else max(0.0, time.time() - newest)
+
+    def _stale(self, label: str) -> bool:
+        h = self.health.get(label)
+        return (label != "local" and h.journal_age_s is not None
+                and h.journal_age_s > self.journal_stale_s)
+
+    def _skip(self, label: str) -> bool:
+        """Leave this machine out of discovery and live outputs (rev 12.2)."""
+        return self.health.get(label).state in ("unreachable", "vc_down") or self._stale(label)
+
+    def _health_refusal(self, label: str) -> PreviewError | None:
+        """Why a preview cannot go to this machine right now, or None."""
+        h = self.health.get(label)
+        name = "controller" if label == "local" else label
+        if h.state == "unreachable":
+            return PreviewError(503, "machine_unreachable", machine=name)
+        if h.state == "vc_down":
+            return PreviewError(503, "vc_down", machine=name)
+        if self._stale(label):
+            return PreviewError(503, "journal_stale", machine=name,
+                                journal_age_s=round(h.journal_age_s or 0))
+        return None
+
+    def machines_public(self) -> dict:
+        return {("controller" if k == "local" else k): {
+                    **h.public(), "journal_stale": self._stale(k)}
+                for k, h in self.health.all().items()}
+
     def _lock(self, target: Target) -> asyncio.Lock:
         return self._locks.setdefault(target.address, asyncio.Lock())
 
@@ -627,7 +717,7 @@ class NdiPreview:
         drives: dict[str, list[str]] | None = None
         if live:
             drives = {}
-            machines = await self._machines()
+            machines = [m for m in await self._machines() if not self._skip(m)]
             results = await asyncio.gather(*(self.outputs(m) for m in machines),
                                            return_exceptions=True)
             for m, r in zip(machines, results):
@@ -635,7 +725,8 @@ class NdiPreview:
                     drives[m] = [o["name"] for o in r[1]]
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, ndi_screens.catalogue, self.mappings_path,
-                                          self.cfg.network_map_path, drives)
+                                          self.cfg.network_map_path, drives,
+                                          dict(self._outputs_info))
 
     async def _screen(self, arg: str) -> Screen:
         try:
@@ -653,7 +744,7 @@ class NdiPreview:
         err = guard(self.bridge.engine, False)
         if err:
             raise err
-        machines = await self._machines()
+        machines = [m for m in await self._machines() if not self._skip(m)]
         targets = await asyncio.gather(*(self.resolve_target(m) for m in machines),
                                        return_exceptions=True)
         pairs = [(m, t) for m, t in zip(machines, targets) if isinstance(t, Target)]
@@ -745,6 +836,8 @@ class NdiPreview:
             raise PreviewError(503, "no_region_lines",
                                hint="VC older than 0.1.2-7 (no 'region' lines), or no answer")
         self._outputs_cache[target.address] = (time.monotonic(), outs)
+        self._outputs_info["local" if target.local else (machine or target.key)] = {
+            o["name"]: {"mode": o["mode"], "region": o["region"]} for o in outs}
         return target, outs
 
     # ---------------- show / stop / status ----------------
@@ -757,6 +850,11 @@ class NdiPreview:
         if err:
             raise err
         screen = await self._screen(output_arg)
+        self.health.touch()
+        refusal = self._health_refusal(screen.target)
+        if refusal:
+            # Before resolving, sending or opening a relay (rev 12.2, D32/D33).
+            raise refusal
         target = await self.resolve_target(screen.target)
         lock = self._lock(target)
         if lock.locked():
@@ -890,12 +988,15 @@ class NdiPreview:
                     log.info("ndi-preview: %s on %s → %s%s", req.source, req.screen.alias,
                              v.state, f" ({v.reason})" if v.reason else "")
                     return
-            req.verdict = Verdict(state="unconfirmed",
-                                  reason="no terminal VC line within %.0fs" % CONFIRM_TIMEOUT_S)
+            detail = "no terminal VC line within %.0fs" % CONFIRM_TIMEOUT_S
             version = self._versions.get(req.target.address) or await self.journal.version(req.target)
             if version is None:
-                req.verdict.reason += (" — no VC version line seen (VC older than "
-                                       "0.1.2-7, journal lag, or a vacuumed journal)")
+                detail += (" — no VC version line seen (VC older than "
+                           "0.1.2-7, journal lag, or a vacuumed journal)")
+            # Say why in a token the page can put in Spanish (rev 12.2, M6).
+            why = self._health_refusal(req.screen.target)
+            req.verdict = Verdict(state="unconfirmed",
+                                  reason=why.reason if why else "no_vc_reply", detail=detail)
         except PreviewError as e:
             req.verdict = Verdict(state="unconfirmed", reason=e.reason)
         except Exception:
@@ -947,6 +1048,24 @@ class NdiPreview:
         self._status_cache[authorized] = (time.monotonic(), result)
         return result
 
+    @staticmethod
+    def _reread(req: _Request, msgs: list[str]) -> None:
+        """Follow a confirmed preview from its own lines only (rev 12.2, M3):
+        the latest fit line of ITS layer gives the current size and flips
+        no_frames_yet to frames; "Source format updated/changed" lines carry
+        no layer id and are ignored. An engine reset or a VC restart after
+        the request wiped the layer."""
+        for msg in msgs:
+            m = _FIT_RE.match(msg)
+            if m and m.group("id") == req.layer_id:
+                req.verdict.fit = {"output": m.group("region"), "mode": m.group("mode"),
+                                   "pos": [int(m.group("x")), int(m.group("y"))],
+                                   "scale": float(m.group("sx")), "basis": m.group("basis")}
+            elif msg.startswith("Reset: removing all layers") or _VERSION_RE.match(msg):
+                req.wiped = True
+        if req.verdict.state == "no_frames_yet" and fit_size(req.verdict.fit):
+            req.verdict.state = "frames"
+
     async def _status(self, authorized: bool) -> dict:
         eng = self.bridge.engine
         previews = []
@@ -958,11 +1077,7 @@ class NdiPreview:
             if req.verdict.state in ("frames", "no_frames_yet") and not req.stopped:
                 try:
                     msgs = await self.journal.read(req.target, req.mark)
-                    if req.verdict.state == "no_frames_yet" and any(
-                            m.startswith("NDI: Source format updated ") for m in msgs):
-                        req.verdict.state = "frames"
-                    if any(m.startswith("Reset: removing all layers") for m in msgs):
-                        req.wiped = True
+                    self._reread(req, msgs)
                 except PreviewError:
                     pass
             previews.append(req.public(authorized))
@@ -973,6 +1088,7 @@ class NdiPreview:
             "auto_load": self.bridge.auto_load_state(),
             "vc_versions": dict(self._versions),
             "previews": previews,
+            "machines": self.machines_public(),
             "relays": [r.stats(authorized) for r in self._relays.values()],
         }
 
@@ -1035,6 +1151,7 @@ class NdiPreview:
         stray web page and these endpoints is D27 (JSON only → a CORS
         preflight the bridge never answers). A valid token still unlocks the
         relay details in /ndi/status (D22)."""
+        self.health.touch()
         if not self.bridge._rate.allow(key):
             return self.bridge._err("rate_limited", 429)
         return None
@@ -1078,11 +1195,24 @@ class NdiPreview:
             found = await self.sources()
         except PreviewError as e:
             return self._fail(e)
-        body = {"ok": True, "sources": [s.public(i + 1) for i, s in enumerate(found)]}
+        sizes = self._shown_sizes()
+        body = {"ok": True, "sources": [s.public(i + 1, sizes.get(s.name))
+                                        for i, s in enumerate(found)]}
         if not found:
             body["hint"] = ("no NDI source seen by any machine: put the laptop on the nodes' "
                             "switch, the controller's network or its WiFi")
         return web.json_response(body)
+
+    def _shown_sizes(self) -> dict[str, dict]:
+        """{source name: {w, h, fps}} for sources on some screen right now
+        (D31: no probing; a source not shown has no size)."""
+        out: dict[str, dict] = {}
+        for req in sorted(self._previews.values(), key=lambda r: r.sent_at):
+            size = fit_size(req.verdict.fit)
+            if req.stopped or req.wiped or req.verdict.state != "frames" or not size:
+                continue
+            out[req.source] = {"w": size[0], "h": size[1], "fps": req.verdict.fps}
+        return out
 
     async def h_outputs(self, request: web.Request) -> web.Response:
         if (r := self._gate(request, "ndi_outputs")):
@@ -1093,7 +1223,10 @@ class NdiPreview:
             screens = await self.screens(live=live)
         except PreviewError as e:
             return self._fail(e)
-        return web.json_response({"ok": True, "outputs": [s.public() for s in screens]})
+        return web.json_response({"ok": True, "outputs": [
+            {**s.public(), "machine_state": {
+                **self.health.get(s.target).public(), "journal_stale": self._stale(s.target)}}
+            for s in screens]})
 
     async def h_preview(self, request: web.Request) -> web.Response:
         if (r := self._gate(request, "ndi_preview")):
@@ -1135,10 +1268,12 @@ class NdiPreview:
         return web.json_response({"ok": True, "stopped": stopped})
 
     async def h_status(self, request: web.Request) -> web.Response:
+        self.health.touch()
         authorized = self.bridge._check_token(request)
         return web.json_response({"ok": True, **(await self.status(authorized))})
 
     async def close(self) -> None:
+        await self.health.close()
         for key in list(self._relays):
             await self._close_relay(key, "bridge stop")
         for t in list(self._tasks):
