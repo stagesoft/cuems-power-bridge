@@ -454,8 +454,16 @@ async function loadOutputs() {
     $("screens-msg").textContent = say(data.reason);
     return;
   }
-  $("screens-msg").textContent = "";
-  const list = data.outputs || [];
+  // A screen the VC says it does not drive (disabled in display.conf, or not
+  // plugged) is left out: nothing can be shown there (Ion 2026-10-13). When
+  // the live check is off (during a show) "present" is null and all stay.
+  const all = data.outputs || [];
+  const list = all.filter((s) => s.present !== false);
+  const hidden = all.length - list.length;
+  $("screens-msg").textContent = hidden
+    ? hidden + (hidden === 1 ? " salida sin usar oculta" : " salidas sin usar ocultas") +
+      " (desactivadas o sin nada conectado)"
+    : "";
   const same = list.length === screenList.length &&
     list.every((s, i) => s.alias === screenList[i].alias && s.present === screenList[i].present &&
                          s.name === screenList[i].name && s.mode === screenList[i].mode &&
@@ -491,7 +499,7 @@ function buildCards() {
     card.append(title, sub);
     if (sc.mode) { card.append(modeLine); }
     card.append(health, now, err, row);
-    if (sc.present === false) {
+    if (sc.present === false) {   // only reached if a screen is shown before its live check
       card.classList.add("absent");
       sub.textContent += " · no conectada";
     }
