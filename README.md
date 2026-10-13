@@ -53,6 +53,7 @@ It is composed of:
   - [`config`](#config)
   - [`engine_state`](#engine_state)
   - [`editor_client`](#editor_client)
+  - [`project_ops` and `project_nodes`](#project_ops-and-project_nodes)
   - [`shelly`](#shelly)
   - [`network_map`](#network_map)
   - [`node_executor`](#node_executor)
@@ -282,21 +283,48 @@ Persistent binary-OSC WebSocket client for the CUEMS engine.
 
 **Module:** `src/cuemspowerbridge/editor_client.py`
 
-Persistent JSON WebSocket client for the CUEMS editor.
+Persistent JSON WebSocket client for the CUEMS editor (`ws://localhost:9092`). It carries
+the project operations: `project_ready` (load, by UUID), `project_unload` and `project_list`.
 
-* **`EditorClient`** — maintains a long-lived WebSocket connection to
-  `ws://localhost:9092`; used exclusively for the auto-load path.
-* **`EditorClient.send_action(action, value)`** — sends `{"action": ..., "value": ...}`
-  JSON. Returns `False` if the WebSocket is not connected.
-* **`EditorClient.wait_for_response(action, timeout)`** — clears any prior cached response
-  for the action, then awaits a fresh response frame matching the action within `timeout`
-  seconds. Returns the response dict or `None` on timeout. Used for fail-fast detection of
-  `{"type": "error", "action": "project_ready"}` (unknown UUID).
-* **Protocol:** The editor sends `{"type": "<action>", "value": ...}` on success or
-  `{"type": "error", "action": "<action>", ...}` on failure. The client keys by `"action"`
-  field for error frames, by `"type"` otherwise.
+* **Requests are matched to replies**, never by "the last frame of that type":
+  `register()` the request **before** its frame is sent (`send_registered()`, or
+  `request()` for both), then `wait(req, timeout)`. A fast reply can't slip past it.
+* **`project_ready` and `project_unload` are single-flight**: a second one while either is
+  outstanding raises `RequestPending`. The editor runs a session's requests concurrently,
+  so a later unload could overtake a slow load (media refresh, up to minutes) and reach the
+  engine first; only once the editor has answered is the order fixed.
+* **The slot is freed by the reply or a disconnect**, never by a waiter's timeout: a request
+  that timed out stays registered until the editor answers, so a late reply can never be
+  taken for a later request's. A failed or cancelled send unregisters it.
+* `project_ready` replies are matched by UUID (`value` on success, `uuid` on an error).
+  `project_list` replies go to every pending list request.
+* **On disconnect every pending request fails** with `EditorDisconnected` (the editor cancels
+  a closed session's in-flight requests). `close_socket()` forces that when a request has
+  gone unanswered past the operation budget.
+* **Protocol:** `{"type": "<action>", "value": ...}` on success,
+  `{"type": "error", "action": "<action>", ["uuid": ...,] "value": msg}` on failure.
 * **Reconnect:** exponential backoff 1 → 2 → 4 → 8 → 16 s (cap). Loopback only; no
   authentication (loopback is the trust boundary per the editor's `CuemsWsServer.py:119`).
+
+[↑ Back to Table of Contents](#table-of-contents)
+
+---
+
+### `project_ops` and `project_nodes`
+
+**Modules:** `src/cuemspowerbridge/project_ops.py`, `src/cuemspowerbridge/project_nodes.py`
+
+`ProjectOps` serves `POST /loadproject`, `POST /unloadproject` and `GET /projects`, and keeps
+the record `GET /status` shows as `project_op`. Each load or unload is an `Op` updated by
+events (engine status frames, the editor's reply, a budget timer), not by a polling task.
+A load is **armed** when, after the bridge sent it, the engine has reported `armed` other
+than `yes` and then `armed == "yes"` with `load` equal to the project's unix_name. Boot
+auto-load's attempts are operations too.
+
+`project_nodes` applies the engine's own rule for which nodes a load waits for, **before**
+the load: the node UUIDs in the project's `script.xml` outputs, that are `<adopted>` in
+`network_map.xml`, minus the controller (`settings.xml <node><uuid>`). Each needed node is
+`on_bus`, `off_bus` or `unknown` against the controller's NNG hub peers (`ss`).
 
 [↑ Back to Table of Contents](#table-of-contents)
 
@@ -615,7 +643,10 @@ Content-Type: application/json
   "nodes_pending":        [],
   "nextcue":              "0123abcd-4567-89ab-cdef-0123456789ab",
   "shelly_timer_armed_s": 60,
-  "last_error":           null
+  "last_error":           null,
+  "project_loaded":       "show_a",
+  "project_op":           {"seq": 3, "kind": "load", "name": "Show A", "state": "armed", "...": "..."},
+  "auto_load":            {"project": null, "disabled": false, "disabled_reason": null, "...": "..."}
 }
 ```
 
@@ -628,6 +659,9 @@ Content-Type: application/json
 | `nextcue` | string | UUID of the cue that fires on the next GO (engine's cached `/engine/status/nextcue`); confirms a `/setnextcue` selection took effect |
 | `shelly_timer_armed_s` | int | Configured `shelly_safety_timer_s` (informational) |
 | `last_error` | string\|null | Reason token from the last failure |
+| `project_loaded` | string | unix_name of the loaded project (`""` = none) |
+| `project_op` | object\|null | The last load/unload sent by the bridge (see `POST /loadproject`); `null` until the first one, and after a bridge restart |
+| `auto_load` | object | Boot auto-load: `project`, `persistent`, `done`, `disabled`, `disabled_reason` (`clobber`, `editor_errors`, `operator_load`, `operator_unload`), `active` |
 
 ---
 
@@ -744,6 +778,129 @@ HTTP/1.1 200 OK
 > **Partial state:** if `setnextcue` succeeds but `go` fails (WebSocket dropped between the
 > two frames) this returns 502; the node's cue pointer may already have moved, so a later
 > operator GO would fire it.
+
+---
+
+#### `POST /loadproject`
+
+Load a project, as the CUEMS UI does: through the editor (`project_ready`), then the engine
+arms it on every node. **Never stops a show**: while one is running it answers
+`409 project_running` and sends nothing; the operator presses STOP first.
+
+Input, from the query string or a JSON body:
+
+| Parameter | Meaning |
+|---|---|
+| `project=<uuid>` | The project's UUID (any case). **Use this in Companion**: a name changes on rename |
+| `name=<name>` | The exact project name, URL-encoded (`Show%20A`) |
+| `reload=1` | Load even when the project is already loaded and freshly armed, or joins a load in progress |
+| `force=1` | Load even though a node the project needs is off the bus |
+| `check=1` | Dry run: say what a press would do, send nothing |
+| `wait=1` | Wait for the outcome instead of answering 202 |
+
+```
+POST /loadproject?project=0123abcd-4567-89ab-cdef-0123456789ab HTTP/1.1
+X-Auth-Token: <token>
+
+HTTP/1.1 202 Accepted
+{"ok": true, "state": "loading", "seq": 7, "project": "0123abcd-…", "name": "Show A",
+ "joined": false, "replaced": "show_b", "node_check": "ok", "nodes_missing": [],
+ "nodes_unchecked": [], "nodes_not_in_cluster": [], "budget_s": 450}
+```
+
+The default answer is **202 at once**; follow the outcome in `GET /status` → `project_op`:
+`loading`, then `armed` (ready for GO), `degraded` (armed, but a node the project needs is
+missing: its cues will not play), or `failed` (`reason`, `message`). Later it reads `played`
+(a GO ran it), `replaced` (someone else loaded another project), `unloaded`, or
+`superseded` (a later load/unload from the bridge). `overdue: true` means no arm within
+`project_op_timeout_s`; it can still arm afterwards.
+
+What a press does, in order:
+
+* **A show is running** → `409 project_running`.
+* **The same project is already loading** (its editor request pending or answered) →
+  `202` with `"joined": true` and the same `seq`; nothing is sent again.
+* **Another load or unload is still waiting for the editor** →
+  `409 previous_request_pending` (`pending`, `retry_after_s`). One request at a time keeps
+  them in order; the wait is usually 1–3 s, minutes when the editor re-indexes media. If
+  the editor stops answering altogether the bridge reconnects to it after the budget;
+  `sudo systemctl restart cuems-editor` frees it at once and never touches playback.
+* **The project is loaded and freshly armed** (armed right after a load, not played since)
+  → `200 {"already_loaded": true}`; nothing is sent, so the videos do not reset. After a
+  show has played, after a STOP, or after a bridge/engine reconnect the press **reloads**
+  (a clean show: cues re-armed, runtime enable/disable toggles reset).
+* **A node the project needs is off the controller's NNG bus** →
+  `409 nodes_not_ready` with `nodes: [{uuid, label, expected_ip}]` and `peers_seen`.
+  `force=1` loads anyway and the result is `degraded`. Nodes the project does not use never
+  block; a node whose bus state can't be established (no `<ip>`, a hub peer the map does not
+  know, `ss` failed) is reported in `nodes_unchecked` and never blocks; a project that
+  references a node not adopted in the cluster is reported in `nodes_not_in_cluster`.
+
+| Status | Reason token | Condition |
+|---|---|---|
+| 202 | — | Load sent (or joined: `"joined": true`) |
+| 200 | — | `already_loaded`, or `wait=1` → armed, or `check=1` |
+| 207 | `degraded` | `wait=1`: armed without a needed node |
+| 400 | `missing_project` / `invalid_project` | No `project`/`name`, or `project` is not a UUID |
+| 401 | `bad_token` | Token mismatch |
+| 404 | `unknown_project` | No live project with that UUID or name |
+| 409 | `project_running` | A show is running (nothing sent) |
+| 409 | `previous_request_pending` | A load/unload is still waiting for the editor |
+| 409 | `nodes_not_ready` | A node the project needs is off the bus (no `force=1`) |
+| 409 | `op_busy` | Another `/loadproject` or `/unloadproject` is being checked right now |
+| 409 | `shutdown_already_in_progress` | A shutdown is running |
+| 409 | `superseded` | `wait=1`: a later load/unload replaced this one |
+| 429 | `rate_limited` | Within 200 ms of the previous call |
+| 502 | `failed` reasons, `editor_send_failed`, `editor_error` | `wait=1`: the load failed (`reason`: `editor_error`, `project_running`, `editor_lost`); or the request could not be sent |
+| 503 | `engine_state_unknown` / `editor_unavailable` / `shutdown` | Engine or editor not connected; `wait=1` interrupted by shutdown |
+| 504 | `timeout` / `editor_timeout` | `wait=1`: no arm within the budget (the load goes on); or no project list from the editor |
+
+`check=1` answers `200 {"check": true, "would": "load"|"already_loaded"|"join"|"refuse",
+"reason": …, "node_report": {"needed": [{uuid, label, ip, bus}], "peers_seen": […], …}}`.
+
+> **Boot auto-load.** Loading another project, or unloading, suspends auto-load until the
+> bridge restarts (`auto_load.disabled_reason`), so a persistent auto-load can't reload
+> behind the operator. Loading the auto-load project itself keeps it and counts as its load.
+
+---
+
+#### `POST /unloadproject`
+
+Unload the loaded project (editor `project_unload`). **Never stops a show**: refused with
+`409 project_running` while one runs. Synchronous (the editor's unload is).
+
+**Controller-side only** (`"scope": "controller"`): the engine forwards a STOP to the nodes,
+which keep the old project's players and video layers resident until the next load, and
+`/tmp/cuems.show.lock` stays (so `cuems-display-setup` still refuses). That is the engine's
+behaviour, the same as an unload from the UI.
+
+| Status | Reason token | Condition |
+|---|---|---|
+| 200 | — | Unloaded (`"confirmed": false` if the engine still reported a project 2 s later); or `"already_unloaded": true` (nothing loaded, nothing sent) |
+| 401 | `bad_token` | Token mismatch |
+| 409 | `project_running` | A show is running (nothing sent), or the engine refused for that reason |
+| 409 | `previous_request_pending` / `op_busy` / `shutdown_already_in_progress` | As for `/loadproject` |
+| 429 | `rate_limited` | Within 200 ms of the previous call |
+| 502 | `editor_error` / `editor_send_failed` | The editor or engine refused (`message`) |
+| 503 | `engine_state_unknown` / `editor_unavailable` | Not connected, or the editor dropped mid-request |
+| 504 | `editor_timeout` | No answer within 30 s (the unload may still happen) |
+
+---
+
+#### `GET /projects`
+
+The loadable projects (live, not in the trash), newest first, and the loaded one. Takes the
+token when `shared_token` is set; answers are cached 2 s.
+
+```
+GET /projects HTTP/1.1
+X-Auth-Token: <token>
+
+HTTP/1.1 200 OK
+{"ok": true, "loaded": "0123abcd-…",
+ "projects": [{"uuid": "0123abcd-…", "name": "Show A", "unix_name": "show_a",
+               "modified": "2026-10-12 18:40:02"}]}
+```
 
 ---
 
@@ -974,6 +1131,15 @@ Loading: package-data defaults first, then system file overrides on top.
 | `auto_load_project` | `""` | Project UUID to auto-load on boot; empty disables auto-load |
 | `auto_load_persistent` | `false` | `false` = once per bridge process (engine restart does **not** retrigger); `true` = re-arm on every observed empty-load |
 | `auto_play` | `false` | `true` = send GO automatically once an auto-loaded project arms (waits ~30 s for `armed`). Only after the bridge's own auto-load, never a manual load; skipped if already running. No-op unless `auto_load_project` is set |
+
+An operator `POST /loadproject` of another project, or `POST /unloadproject`, suspends
+auto-load until the bridge restarts; loading the `auto_load_project` itself keeps it.
+
+#### Load / unload over HTTP
+
+| Key | Default | Description |
+|---|---|---|
+| `project_op_timeout_s` | `450` | How long a `/loadproject` is tracked before `/status` marks it `overdue` (and `wait=1` answers 504). Covers the editor's worst case (a media re-index) plus arming. Clamped to 60–3600; an invalid value means 450 |
 
 #### Operational
 
@@ -1215,10 +1381,21 @@ Add buttons using Companion's **HTTP** module:
 | NDI → *screen* | POST | `http://localhost:8478/ndi/preview` | none; body `{"source":"#1","output":"<screen>"}` |
 | QUITAR *screen* | POST | `http://localhost:8478/ndi/stop` | none; body `{"output":"<screen>"}` |
 | QUITAR TODO | POST | `http://localhost:8478/ndi/stop` | none; body `{}` |
+| CARGAR *show* | POST | `http://localhost:8478/loadproject?project=<uuid>` | `X-Auth-Token: <token>` |
+| DESCARGAR | POST | `http://localhost:8478/unloadproject` | `X-Auth-Token: <token>` |
 
 PROY ON / PROY OFF switch only this controller's projectors (displays, not machines). With
 `?wait=1` the button can show the per-device result; Companion's HTTP timeout must exceed the
 wait bound (see `POST /poweron` / `POST /poweroff`), otherwise drop `?wait=1`.
+
+**Load buttons.** One CARGAR button per show, with the show's UUID (`GET /projects` lists
+them; a name would break on rename). The press answers at once (202) and the load goes on in
+the background; a refusal (a show running, a node off the bus, another load still pending)
+is immediate. Companion's HTTP module cannot poll `GET /status`, so the button cannot show
+when the show is armed; GO's own `409 not_armed` keeps a GO from firing early. `?wait=1`
+returns the outcome instead, but only if Companion's HTTP timeout exceeds
+`project_op_timeout_s` + 5 s. A second press of the same show while it loads joins it;
+DESCARGAR and CARGAR never stop a running show (STOP first).
 
 **NDI preview buttons (montajes).** One NDI button and one QUITAR button per screen,
 set up once per cluster, since the screens do not change between montajes. `<screen>` is the

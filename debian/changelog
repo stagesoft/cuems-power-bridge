@@ -22,6 +22,21 @@ cuems-power-bridge (0.3.0-11) UNRELEASED; urgency=medium
     through the relay on the nodes. Needs a videocomposer whose discovery
     lines carry "ips=" (newer than 0.1.2-7); otherwise 409
     hosts_need_controller_vc.
+  * Load and unload a project over HTTP (ClickUp 869fghmxn): POST
+    /loadproject?project=<uuid>|name=<name>, POST /unloadproject, GET
+    /projects, and /status.project_op, project_loaded and auto_load. Loads go
+    through the editor like the UI; 202 at once (wait=1 waits for the arm,
+    check=1 is a dry run). Never stops a show (409 project_running).
+    - One editor request at a time (409 previous_request_pending): the editor
+      handles a session's requests concurrently, so an unload could overtake a
+      slow load. Editor replies are now matched to their requests.
+    - A node the project needs that is off the NNG bus refuses the load (409
+      nodes_not_ready; force=1 loads anyway, reported degraded). Nodes the
+      project does not use never block.
+    - Loading another project or unloading suspends boot auto-load until the
+      bridge restarts; loading the auto project counts as its load.
+    - NDI preview refuses while a load is tracked (project_op_in_progress).
+    - New key project_op_timeout_s (default 450).
 
  -- Ion Reguera <ion@stagelab.coop>  Tue, 13 Oct 2026 13:30:04 +0200
 
