@@ -74,6 +74,9 @@ input[type=text] { font: inherit; padding: 8px; min-height: 44px; border-radius:
 .chip { display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 999px;
   border: 1px solid var(--line); background: var(--card); }
 .chip button { min-height: 0; padding: 2px 8px; }
+.chip button.pick { border-color: var(--accent); color: var(--accent); }
+.chip button.pick.on { background: var(--accent); color: var(--accent-fg); }
+ul.sources label.on { border-color: var(--accent); }
 .now { margin: 0; overflow-wrap: anywhere; }
 .now.frames { color: var(--ok); }
 .now.failed { color: var(--bad); }
@@ -336,6 +339,7 @@ async function loadSources() {
   }
   if (!selected && sourceList.length === 1) { selected = sourceList[0].name; }
   renderSources();
+  renderHosts();
   updateCards();
 }
 
@@ -349,7 +353,8 @@ function renderSources() {
     radio.type = "radio";
     radio.name = "source";
     radio.checked = s.name === selected;
-    radio.addEventListener("change", () => { selected = s.name; updateCards(); });
+    radio.addEventListener("change", () => selectSource(s.name));
+    if (s.name === selected) { label.classList.add("on"); }
     const text = el("span");
     text.append(el("span", "name", s.name));
     text.append(el("br"));
@@ -387,10 +392,27 @@ function renderHosts() {
       x.addEventListener("click", () => removeHost(h.ip));
       chip.append(x);
     }
-    const note = hostNotes.get(h.ip);
+    // The sources found at this IP, to pick right here (Ion 2026-10-13: an
+    // added IP must lead to its source, not to a second list).
+    const here = sourceList.filter((s) => s.via_ip && s.ip === h.ip);
+    for (const s of here) {
+      const pick = el("button", "pick" + (s.name === selected ? " on" : ""), s.name);
+      pick.type = "button";
+      pick.title = "Elegir esta fuente";
+      pick.addEventListener("click", () => selectSource(s.name));
+      chip.append(pick);
+    }
+    const note = here.length ? "" : hostNotes.get(h.ip);
     if (note) { chip.append(el("span", "muted", note)); }
     box.append(chip);
   }
+}
+
+function selectSource(name) {
+  selected = name;
+  renderSources();
+  renderHosts();
+  updateCards();
 }
 
 async function addHost() {

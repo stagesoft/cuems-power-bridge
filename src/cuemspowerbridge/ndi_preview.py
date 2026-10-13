@@ -636,8 +636,13 @@ class SeenSource:
     via_ip: bool = False         # the controller found it only through an extra IP
 
     def public(self, n: int, size: dict | None = None) -> dict:
-        return {"n": n, "name": self.name, "seen_by": sorted(self.seen_by), "size": size,
-                "via_ip": self.via_ip}
+        out = {"n": n, "name": self.name, "seen_by": sorted(self.seen_by), "size": size,
+               "via_ip": self.via_ip}
+        if self.via_ip:
+            # The IP part only (the operator typed it; D22 hides relay
+            # upstreams, not this): lets the page put the source under its IP.
+            out["ip"] = (self.seen_by.get("controller") or "").rpartition(":")[0] or None
+        return out
 
 
 class NdiPreview:

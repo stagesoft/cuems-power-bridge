@@ -141,6 +141,7 @@ async def test_add_a_host_finds_its_source(tmp_path, monkeypatch):
         assert body["found"] == [LAPTOP] and body["hosts"] == [{"ip": "10.20.0.15", "from": "page"}]
         src = (await (await client.get("/ndi/sources")).json())["sources"]
         assert [(s["name"], s["via_ip"]) for s in src] == [(LAPTOP, True)]
+        assert src[0]["ip"] == "10.20.0.15"          # the page puts it under its IP chip
         await asyncio.sleep(0.25)
         r = await client.post("/ndi/hosts", json={"ip": "10.20.0.15", "remove": True})
         assert r.status == 200 and (await r.json())["hosts"] == []

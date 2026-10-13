@@ -75,7 +75,9 @@ def test_page_uses_relative_urls_only():
 def test_page_sends_sources_by_name_and_all_only_from_quitar_todo():
     previews = re.findall(r'api\("POST", "preview", \{([^}]*)\}', SCRIPT)
     assert previews == [" source: selected, output: alias, mode: mode() "]
-    assert re.search(r"selected = s\.name", SCRIPT)      # a name from the list, never "#n"
+    # A name from the list (radio or an IP chip's pick button), never "#n".
+    assert re.search(r"selectSource\(s\.name\)", SCRIPT)
+    assert re.search(r"function selectSource\(name\) \{\s*selected = name;", SCRIPT)
     # The only body without "output" is the Quitar todo one.
     stops = re.findall(r'api\("POST", "stop", ([^)]*)\)', SCRIPT)
     assert sorted(stops) == ["{ output: alias }", "{}"]
