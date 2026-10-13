@@ -125,7 +125,7 @@ def test_every_preview_state_has_spanish_text():
 
 def test_every_guard_refusal_has_a_top_line():
     assert _table("BLOCKED") == {"project_loaded", "project_running", "engine_unknown",
-                                 "auto_load_active"}
+                                 "auto_load_active", "project_op_in_progress"}
 
 
 def test_page_never_asks_for_or_stores_a_token():

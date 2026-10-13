@@ -4,104 +4,114 @@
 
 """Bridge auto-load: classification, re-drive guard, stop-cancellation.
 
-Async paths run through asyncio.run wrappers. The engine/editor channels are
-replaced with lightweight fakes; the NNG-hub wait is disabled
+Async paths run through asyncio.run wrappers. The engine channel is a real
+EngineClient fed status frames by hand (_apply_status); the editor is a real
+EditorClient whose send_action is scripted. Since plan 869fghmxn an auto-load
+attempt is an operation (ProjectOps), so "armed" is decided by the engine's
+frames (armed no → load → armed yes). The NNG-hub wait is disabled
 (auto_load_wait_nodes=False) so these focus on the load/arm classification."""
 
 import asyncio
 
 from cuemspowerbridge.bridge import Bridge
 from cuemspowerbridge.config import Config
-from cuemspowerbridge.engine_state import UNKNOWN
+from cuemspowerbridge.editor_client import EditorClient
+from cuemspowerbridge.engine_state import UNKNOWN, EngineClient
 
 
-class FakeEngine:
-    def __init__(self):
-        self.load = ""
-        self.armed = "no"
-        self.running = "no"
+class FakeEditor(EditorClient):
+    """`mode`: "arm" (engine loads projX and arms), "load" (loads, never
+    arms), "error" (the editor rejects the uuid), "silent" (no answer)."""
+
+    def __init__(self, bridge, mode="arm"):
+        super().__init__("ws://test")
         self.connected = True
-        self.stopped = False
-
-    def is_known(self):
-        return True
-
-    def project_loaded(self):
-        return self.load not in ("", UNKNOWN)
-
-    def project_running(self):
-        return self.running == "yes"
-
-    def fully_ready(self):
-        return self.project_loaded() and self.armed == "yes"
-
-    async def stop(self):
-        self.stopped = True
-
-
-class FakeEditor:
-    def __init__(self, resp=None, raise_on_wait=False):
-        self.connected = True
-        self._resp = resp
-        self.raise_on_wait = raise_on_wait
+        self.bridge = bridge
+        self.mode = mode
         self.sent = []
-        self.stopped = False
 
     async def send_action(self, action, value):
+        loop = asyncio.get_running_loop()
+        if action == "project_list":
+            loop.call_soon(self._resolve, {"type": "project_list", "value": []})
+            return True
         self.sent.append((action, value))
+        if action == "project_ready":
+            loop.call_soon(self._answer, value)
         return True
 
-    async def wait_for_response(self, action, timeout):
-        if self.raise_on_wait:
-            raise RuntimeError("editor watcher boom")
-        return self._resp
+    def _answer(self, uuid):
+        feed = self.bridge.engine._apply_status
+        if self.mode == "error":
+            self._resolve({"type": "error", "action": "project_ready", "uuid": uuid,
+                           "value": f"item with uuid: {uuid} does not exist"})
+            return
+        if self.mode == "silent":
+            return
+        feed("armed", "no")
+        feed("load", "projX")
+        self._resolve({"type": "project_ready", "value": uuid})
+        if self.mode == "arm":
+            feed("armed", "yes")
 
-    async def stop(self):
-        self.stopped = True
 
-
-def _bridge(*, armed_timeout=1, editor_resp=None):
+def _bridge(*, armed_timeout=1, mode="arm"):
     cfg = Config()
     cfg.auto_load_project = "uuid-x"
     cfg.auto_load_wait_nodes = False          # skip the NNG-hub wait
     cfg.auto_load_node_settle_s = 0
     cfg.auto_load_armed_timeout_s = armed_timeout  # set directly (bypass validate floor)
     b = Bridge(cfg)
-    b.engine = FakeEngine()
-    b.editor = FakeEditor(resp=editor_resp)
+    b.engine = EngineClient("ws://test")
+    b.engine.connected = True
+    b.engine.on_status(b.projects.on_engine_status)
+    for key, value in (("running", "no"), ("armed", "no"), ("load", "")):
+        b.engine._apply_status(key, value)
+    b.editor = FakeEditor(b, mode)
     return b
 
 
 def test_armed_success():
     b = _bridge()
-    b.engine.load = "projX"
-    b.engine.armed = "yes"
     outcome = asyncio.run(b._try_auto_load())
     assert outcome == "armed"
     assert b._auto_load_done is True
     assert b._auto_load_unix_name == "projX"
     assert b.editor.sent == [("project_ready", "uuid-x")]
+    assert b.projects.op.source == "auto_load"
 
 
 def test_editor_error_hard_disables_after_three():
-    b = _bridge(editor_resp={"type": "error", "action": "project_ready"})
+    b = _bridge(mode="error")
     for i in range(2):
         assert asyncio.run(b._try_auto_load()) == "editor_error"
         assert b._auto_load_disabled is False
         assert b._auto_load_failures == i + 1
     assert asyncio.run(b._try_auto_load()) == "editor_error"
     assert b._auto_load_disabled is True
+    assert b._auto_load_disabled_reason == "editor_errors"
 
 
 def test_not_armed_is_soft_never_disables():
-    # Editor acks nothing, engine never arms → soft.
-    b = _bridge(armed_timeout=1, editor_resp=None)
-    b.engine.load = "projX"
-    b.engine.armed = "no"
+    # The engine loads but never arms → soft.
+    b = _bridge(armed_timeout=1, mode="load")
     outcome = asyncio.run(b._try_auto_load())
     assert outcome == "not_armed"
     assert b._auto_load_disabled is False
     assert b._auto_load_done is False
+
+
+def test_skipped_while_another_request_is_pending():
+    # The one-request slot is held (e.g. an operator /unloadproject still
+    # waiting for the editor): the attempt is skipped quietly, not counted.
+    b = _bridge()
+
+    async def main():
+        b.editor.register("project_unload")
+        return await b._try_auto_load()
+
+    assert asyncio.run(main()) == "skipped"
+    assert b.editor.sent == []
 
 
 def test_operator_clobber_detects_different_load():
@@ -138,6 +148,7 @@ def test_loop_backs_off_on_operator_clobber():
 
     asyncio.run(driver())
     assert b._auto_load_disabled is True
+    assert b._auto_load_disabled_reason == "clobber"
     assert b.editor.sent == []  # never clobbered
 
 
@@ -145,9 +156,7 @@ def test_not_armed_records_unix_name_for_clobber_guard():
     # Fix: during the soft-retry window (loaded but not armed), the bridge must
     # record the unix_name its drive produced, so an operator loading a
     # DIFFERENT project before first arm is caught by _operator_clobber.
-    b = _bridge(armed_timeout=1)
-    b.engine.load = "projX"
-    b.engine.armed = "no"
+    b = _bridge(armed_timeout=1, mode="load")
     assert asyncio.run(b._try_auto_load()) == "not_armed"
     assert b._auto_load_unix_name == "projX"
     # Operator now loads a different project mid soft-retry → clobber detected.
@@ -155,15 +164,21 @@ def test_not_armed_records_unix_name_for_clobber_guard():
     assert b._operator_clobber() is True
 
 
-def test_editor_watcher_exception_does_not_crash_attempt():
-    # Fix: a raising editor-error watcher must not propagate out of the attempt
-    # (which would kill the auto-load loop). It degrades to a soft miss.
-    b = _bridge(armed_timeout=1)
-    b.editor.raise_on_wait = True
-    b.engine.load = "projX"
-    b.engine.armed = "no"
-    outcome = asyncio.run(b._try_auto_load())
-    assert outcome == "not_armed"
+def test_editor_drop_mid_attempt_is_a_soft_miss():
+    # The editor socket drops after project_ready went out: the attempt must
+    # not raise out of the loop; with no engine evidence it is a soft miss.
+    b = _bridge(armed_timeout=1, mode="silent")
+
+    async def main():
+        task = asyncio.create_task(b._try_auto_load())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if b.editor.sent:
+                break
+        b.editor._fail_pending("editor socket closed")
+        return await task
+
+    assert asyncio.run(main()) == "not_armed"
     assert b._auto_load_disabled is False
 
 
@@ -217,8 +232,9 @@ def test_stop_cancels_inflight_auto_load_task():
 
     b = asyncio.run(driver())
     assert b._auto_load_task is None
-    assert b.engine.stopped is True
-    assert b.editor.stopped is True
+    assert b._stopping is True
+    assert b.engine._stop.is_set()
+    assert b.editor._stop.is_set()
 
 
 # --- settle margin on a SINGLE-CONTROLLER cluster -------------------------
@@ -235,8 +251,6 @@ def _settle_bridge(*, wait_nodes, settle_s, slaves):
     b = _bridge()
     b.cfg.auto_load_wait_nodes = wait_nodes
     b.cfg.auto_load_node_settle_s = settle_s
-    b.engine.load = "projX"
-    b.engine.armed = "yes"
 
     async def fake_expected():
         return slaves

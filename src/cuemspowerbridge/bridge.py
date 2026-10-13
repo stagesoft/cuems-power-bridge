@@ -27,6 +27,7 @@ from .editor_client import EditorClient
 from .engine_state import UNKNOWN, EngineClient
 from .ndi_preview import NdiPreview
 from .node_executor import SshTarget, poweroff_all
+from .project_ops import Op, ProjectOps
 from .reachability import wait_until_all_down
 from .shelly import ShellyClient, ShellyError
 
@@ -116,6 +117,9 @@ class Bridge:
         self._auto_load_failures = 0       # HARD (editor error) strikes → disable at 3
         self._auto_load_soft_attempts = 0  # SOFT (loaded-but-not-armed) retries; never disable
         self._auto_load_disabled = False
+        # Why auto-load stopped for this process: clobber | editor_errors |
+        # operator_load | operator_unload (plan 869fghmxn §4.5).
+        self._auto_load_disabled_reason: str | None = None
         self._auto_load_unix_name: str | None = None  # our own driven project's load name
         self._auto_load_ids_warned = False
         self._autoload_pending: list[str] = []  # role_ids still off the bus (degraded)
@@ -128,6 +132,10 @@ class Bridge:
         self._nodes_pending: list[str] = []
         self._last_error: str | None = None
         self._rate = _RateLimiter()
+        # Set first thing in stop(): nothing may restart the auto-load loop.
+        self._stopping = False
+        # POST /loadproject, /unloadproject, GET /projects (plan 869fghmxn).
+        self.projects = ProjectOps(self)
         # NDI preview during montajes (/ndi/*, cuems-ndi-preview).
         self.ndi = NdiPreview(self)
 
@@ -176,6 +184,11 @@ class Bridge:
             "brightness_levels": self.displays.brightness_levels,
             "brightness_devices": self.displays.brightness_count,
             "last_brightness_level": self.displays.last_brightness_level,
+            # Load/unload over HTTP (plan 869fghmxn): the loaded unix_name, the
+            # last operation (state derived live), and auto-load's own state.
+            "project_loaded": self.engine.load if self.engine.load != UNKNOWN else "",
+            "project_op": self.projects.status(),
+            "auto_load": self.auto_load_state(),
         }
 
     # ------------------- HTTP handlers -------------------
@@ -542,6 +555,9 @@ class Bridge:
         # (this path does NOT go through stop(); it cancels tasks directly).
         await self._cancel_auto_play_task()
         await self._cancel_projector_on_task()
+        # A tracked load/unload stops being tracked; its ?wait=1 waiter gets
+        # 503. The editor and engine carry on (the project is not running).
+        self.projects.abort("shutdown")
         projector_off_task: asyncio.Task | None = None
         if self.cfg.projector_power_off_on_shutdown and self.displays.configured:
             projector_off_task = asyncio.create_task(
@@ -654,6 +670,7 @@ class Bridge:
                     self.engine.load, self._auto_load_unix_name,
                 )
                 self._auto_load_disabled = True
+                self._auto_load_disabled_reason = "clobber"
                 return
             # Once-only mode: we already succeeded and operator likely
             # unloaded intentionally — don't re-drive.
@@ -662,7 +679,12 @@ class Bridge:
             try:
                 outcome = await self._try_auto_load()
             except asyncio.CancelledError:
-                raise  # stop() cancelled us — propagate cleanly
+                # stop() or an operator load/unload cancelled us mid-attempt
+                # (bus wait, settle, arm wait): don't leave a stale
+                # "still waiting for" list in /status. A normal not_armed keeps
+                # it — it explains the degraded state.
+                self._autoload_pending = []
+                raise
             except Exception:
                 # An attempt must never kill the loop: log and retry next tick
                 # (the loop is the self-heal mechanism). Treat as a soft miss.
@@ -697,8 +719,77 @@ class Bridge:
             "persistent": self.cfg.auto_load_persistent,
             "done": self._auto_load_done,
             "disabled": self._auto_load_disabled,
+            "disabled_reason": self._auto_load_disabled_reason,
             "active": self.auto_load_active(),
         }
+
+    # ------------------- auto-load vs operator load/unload -------------------
+
+    def _is_auto_project(self, uuid: str) -> bool:
+        auto = (self.cfg.auto_load_project or "").strip().lower()
+        return bool(auto) and auto == (uuid or "").strip().lower()
+
+    def _suspend_auto_load(self, reason: str) -> None:
+        """An operator loaded another project or unloaded: auto-load stops
+        for this process (a bridge restart re-arms it), so a persistent loop
+        can't reload behind the operator's back."""
+        if not self.cfg.auto_load_project or self._auto_load_disabled:
+            return
+        self._auto_load_disabled = True
+        self._auto_load_disabled_reason = reason
+        log.info("auto-load: suspended for this process (%s)", reason)
+
+    async def _pause_auto_load(self) -> bool:
+        """Cancel the auto-load loop (and any attempt in flight) while an
+        operator operation runs. True if it was running; the operation's end
+        restarts it via _restart_auto_load_if_allowed()."""
+        t = self._auto_load_task
+        if t is None or t.done():
+            return False
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("auto-load loop errored while being paused")
+        self._auto_load_task = None
+        return True
+
+    def _restart_auto_load_if_allowed(self, seq: int | None) -> None:
+        """Start the auto-load loop again — unless the bridge is stopping or
+        shutting down, auto-load is off or suspended, the loop already runs,
+        the caller is not the current operation, or an operator operation is
+        still being tracked (its own end will call this)."""
+        if self._stopping or self._shutdown_lock.locked():
+            return
+        if not self.cfg.auto_load_project or self._auto_load_disabled:
+            return
+        if self._auto_load_task is not None and not self._auto_load_task.done():
+            return
+        if seq is not None and seq != self.projects.current_seq():
+            return
+        op = self.projects.op
+        if (op is not None and op.source == "operator" and op.state == "loading"
+                and not op.overdue):
+            return
+        log.info("auto-load: loop restarted")
+        self._auto_load_task = asyncio.create_task(
+            self._auto_load_loop(), name="auto-load"
+        )
+
+    def _on_op_terminal(self, op: Op) -> None:
+        """Called by ProjectOps when an operation ends (or goes overdue)."""
+        if (op.kind == "load" and op.accepted and op.source == "operator"
+                and self._is_auto_project(op.project)):
+            # D10: the operator loaded the auto project — auto-load is done.
+            self._auto_load_done = True
+            self._auto_load_unix_name = op.unix_name
+            self._auto_load_failures = 0
+            self._auto_load_soft_attempts = 0
+            self._autoload_pending = []
+        if op.source == "operator":
+            self._restart_auto_load_if_allowed(op.seq)
 
     def _operator_clobber(self) -> bool:
         """True iff a DIFFERENT project than the one we drove is loaded.
@@ -817,18 +908,20 @@ class Bridge:
         if self.cfg.auto_load_wait_nodes:
             await asyncio.sleep(self.cfg.auto_load_node_settle_s)
 
-        # (4) Fire project_ready.
+        # (4) Fire project_ready — as an operation (plan 869fghmxn D12), so the
+        # one-request rule covers it and an operator press of the same project
+        # joins it instead of sending a duplicate reload.
         if not self.editor.connected:
             log.debug("auto-load: editor not connected, skipping this round")
             return "skipped"
         log.info("auto-load: sending project_ready %s", uuid)
-        sent = await self.editor.send_action("project_ready", uuid)
-        if not sent:
-            log.warning("auto-load: send failed")
+        op = await self.projects.start_auto_load(uuid)
+        if op is None:
+            log.info("auto-load: not sent this round (editor busy or down)")
             return "skipped"
 
         # (5) Confirm armed==yes (or fail-fast on an editor error).
-        outcome = await self._await_armed_or_error(uuid)
+        outcome = await self._await_armed_or_error(op)
 
         # (6) Classify.
         if outcome == "armed":
@@ -851,67 +944,36 @@ class Bridge:
             if self._auto_load_failures >= 3:
                 log.error("auto-load: 3 editor errors, disabling for session")
                 self._auto_load_disabled = True
+                self._auto_load_disabled_reason = "editor_errors"
             return "editor_error"
         # not_armed (soft — loop retries; never disables)
         log.warning("auto-load: project loaded but armed!=yes within %ds "
                     "(soft retry)", self.cfg.auto_load_armed_timeout_s)
         return "not_armed"
 
-    async def _await_armed_or_error(self, uuid: str) -> str:
-        """Wait for ``fully_ready()`` (armed==yes) or an editor error.
+    async def _await_armed_or_error(self, op: Op) -> str:
+        """Wait (up to ``auto_load_armed_timeout_s``) for the operation to end.
 
-        Polls the engine cache every 0.5 s up to ``auto_load_armed_timeout_s``.
-        A single ``wait_for_response("project_ready")`` watches for a fail-fast
-        editor error in parallel; an editor *success* (or timeout) is ignored
-        — the engine `armed` cache is the authoritative readiness signal.
+        The operation is driven by events (ProjectOps): engine status frames
+        decide "armed" — the engine is authoritative — and only a definitive
+        editor error (not its own 25 s "Timeout:") fails it fast.
         Returns "armed" | "editor_error" | "not_armed".
         """
-        timeout = self.cfg.auto_load_armed_timeout_s
-        err_task = asyncio.create_task(self._wait_editor_error(uuid, timeout))
-
-        def editor_errored() -> bool:
-            # Exception-safe: a crashed/cancelled err_task must NOT re-raise
-            # out of the poll (that would abort the whole attempt). Treat any
-            # non-clean completion as "no editor error observed".
-            if not err_task.done() or err_task.cancelled():
-                return False
-            if err_task.exception() is not None:
-                log.warning("auto-load: editor-error watcher raised: %s",
-                            err_task.exception())
-                return False
-            return bool(err_task.result())
-
         try:
-            loops = max(1, int(timeout / 0.5))
-            for _ in range(loops):
-                await asyncio.sleep(0.5)
-                # Record the unix_name our drive produced as soon as a project
-                # loads — even before it arms — so the re-drive guard can spot
-                # an operator loading a DIFFERENT project during the soft-retry
-                # window (before we ever reach armed==yes).
-                if self._auto_load_unix_name is None and self.engine.project_loaded():
-                    self._auto_load_unix_name = self.engine.load
-                if self.engine.fully_ready():
-                    return "armed"
-                if editor_errored():
-                    return "editor_error"
-            if self.engine.fully_ready():
-                return "armed"
-            if editor_errored():
-                return "editor_error"
-            return "not_armed"
-        finally:
-            if not err_task.done():
-                err_task.cancel()
-                try:
-                    await err_task
-                except asyncio.CancelledError:
-                    pass
-
-    async def _wait_editor_error(self, uuid: str, timeout: float) -> bool:
-        """True iff the editor returns an error frame for project_ready."""
-        resp = await self.editor.wait_for_response("project_ready", timeout=timeout)
-        return bool(resp and resp.get("type") == "error")
+            await asyncio.wait_for(op.done.wait(),
+                                   timeout=self.cfg.auto_load_armed_timeout_s)
+        except asyncio.TimeoutError:
+            pass
+        # Record the unix_name our drive produced even before it arms, so the
+        # re-drive guard can spot an operator loading a DIFFERENT project
+        # during the soft-retry window.
+        if self._auto_load_unix_name is None and self.engine.project_loaded():
+            self._auto_load_unix_name = self.engine.load
+        if op.state in ("armed", "degraded"):
+            return "armed"
+        if op.state == "failed" and op.reason == "editor_error":
+            return "editor_error"
+        return "not_armed"
 
     # ------------------- projector power-on -------------------
 
@@ -1089,6 +1151,9 @@ class Bridge:
     async def start(self) -> web.AppRunner:
         await self.engine.start()
         await self.editor.start()
+        # Load/unload operations follow the engine on every box, whatever the
+        # projector config (plan 869fghmxn §4.3).
+        self.engine.on_status(self.projects.on_engine_status)
         if self.cfg.projector_power_on_on_load and self.displays.configured:
             self.engine.on_status(self._on_engine_status)
             self.engine.on_disconnect(self._on_engine_disconnect)
@@ -1108,6 +1173,7 @@ class Bridge:
         app.router.add_post("/poweroff", self.handle_poweroff)
         app.router.add_post("/shutdown", self.handle_shutdown)
         app.router.add_post("/brightness", self.handle_brightness)
+        self.projects.register(app)
         self.ndi.register(app)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -1117,6 +1183,10 @@ class Bridge:
         return runner
 
     async def stop(self) -> None:
+        # Nothing may restart the auto-load loop from here on, and a tracked
+        # load/unload stops being tracked (its ?wait=1 waiter gets 503).
+        self._stopping = True
+        self.projects.abort("shutdown")
         # Cancel the auto-load loop FIRST so an in-flight long bus-wait (up to
         # auto_load_node_timeout_s) can't keep the event loop alive and delay
         # shutdown / risk a systemd SIGKILL. The loop only awaits sleeps/probes

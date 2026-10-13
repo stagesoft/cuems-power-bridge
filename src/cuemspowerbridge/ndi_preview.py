@@ -320,10 +320,12 @@ def classify(messages: list[str], source: str, filepath: str | None = None,
     return v
 
 
-def guard(engine: Any, auto_load_active: bool, force_unknown_engine: bool = False
-          ) -> PreviewError | None:
+def guard(engine: Any, auto_load_active: bool, force_unknown_engine: bool = False,
+          op_loading: bool = False) -> PreviewError | None:
     """The refusal for a `show`, or None. Running before loaded (a running
-    project is also loaded); UNKNOWN is never taken for idle."""
+    project is also loaded); UNKNOWN is never taken for idle. `op_loading`: the
+    bridge is tracking a /loadproject (plan 869fghmxn) — its load will reset
+    every VC, and before it reaches the engine `load` may still read empty."""
     unknown = (not engine.connected or engine.load == UNKNOWN or engine.running == UNKNOWN)
     if unknown:
         if not force_unknown_engine:
@@ -331,6 +333,8 @@ def guard(engine: Any, auto_load_active: bool, force_unknown_engine: bool = Fals
     else:
         if engine.running == "yes":
             return PreviewError(409, "project_running")
+        if op_loading:
+            return PreviewError(409, "project_op_in_progress")
         if engine.load != "":
             return PreviewError(409, "project_loaded")
     if auto_load_active:
@@ -692,9 +696,15 @@ class NdiPreview:
                 self._hosts_cfg.append(ip)
         self._ips_capable: bool | None = None            # the controller VC's last "started" line
         self.health = HealthMonitor(self._machine_ips, self._journal_age,
-                                    lambda: guard(self.bridge.engine, False) is not None)
+                                    lambda: guard(self.bridge.engine, False,
+                                                  op_loading=self._op_loading()) is not None)
 
     # ---------------- plumbing ----------------
+
+    def _op_loading(self) -> bool:
+        """The bridge is tracking a load (not overdue): no preview now."""
+        projects = getattr(self.bridge, "projects", None)
+        return bool(projects is not None and projects.op_loading())
 
     @staticmethod
     def _udp_send(address: str, port: int, path: str, args: list) -> None:
@@ -845,7 +855,7 @@ class NdiPreview:
         sees it. `#n` in show indexes this list."""
         # Not while a project is loaded or running, nor with the engine
         # unknown: discovery would poke every VC of a show (rev 11.1).
-        err = guard(self.bridge.engine, False)
+        err = guard(self.bridge.engine, False, op_loading=self._op_loading())
         if err:
             raise err
         machines = [m for m in await self._machines() if not self._skip(m)]
@@ -962,7 +972,8 @@ class NdiPreview:
                    wait: bool = False, force_unknown_engine: bool = False) -> dict:
         if mode not in FIT_MODES:
             raise PreviewError(400, "bad_mode", modes=list(FIT_MODES))
-        err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine)
+        err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine,
+                    op_loading=self._op_loading())
         if err:
             raise err
         screen = await self._screen(output_arg)
@@ -988,7 +999,8 @@ class NdiPreview:
                 if not address or not await tcp_reachable(address):
                     raise PreviewError(502, "source_unreachable", address=address,
                                        hint="the controller cannot open the source's stream port")
-            err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine)
+            err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine,
+                    op_loading=self._op_loading())
             if err:
                 raise err
             layer = screen.layer_id
@@ -1207,7 +1219,7 @@ class NdiPreview:
                 except PreviewError:
                     pass
             previews.append(req.public(authorized))
-        blocked = guard(eng, self.bridge.auto_load_active())
+        blocked = guard(eng, self.bridge.auto_load_active(), op_loading=self._op_loading())
         return {
             "engine": {"running": eng.running, "load": eng.load, "armed": eng.armed},
             "blocked": blocked.reason if blocked else None,
@@ -1383,10 +1395,10 @@ class NdiPreview:
                 if ip in self._hosts_page:
                     self._hosts_page.remove(ip)
                     log.info("ndi-preview: host %s removed by %s", ip, peer)
-                    if guard(self.bridge.engine, False) is None:
+                    if guard(self.bridge.engine, False, op_loading=self._op_loading()) is None:
                         self._sources_cache.pop("127.0.0.1", None)
                 return web.json_response({"ok": True, "hosts": self._hosts_public()})
-            err = guard(self.bridge.engine, False)
+            err = guard(self.bridge.engine, False, op_loading=self._op_loading())
             if err:
                 raise err
             if ip not in self.hosts():
@@ -1420,7 +1432,7 @@ class NdiPreview:
             return r
         try:
             # The live check asks every VC for its outputs: not during a show.
-            live = guard(self.bridge.engine, False) is None
+            live = guard(self.bridge.engine, False, op_loading=self._op_loading()) is None
             screens = await self.screens(live=live)
         except PreviewError as e:
             return self._fail(e)
