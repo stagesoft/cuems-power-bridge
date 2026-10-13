@@ -60,6 +60,8 @@ LOAD_RECHECK_S = 1.0
 POLL_S = 0.5
 STATUS_CACHE_S = 1.0     # rev 11: pages poll status; one computation per second
 JOURNAL_STALE_S = 600    # rev 12.2 (D33): a node journal older than this cannot route a preview
+MAX_HOSTS = 8            # rev 12.2 §3.10: extra IPs the controller's VC asks directly
+PRECHECK_S = 2.0         # TCP check of a by-IP source's stream port before loading it
 PAGE_FILE = "ndi_page.html"
 FIT_MODES = ("fill", "native")
 
@@ -103,29 +105,104 @@ class Source:
     name: str
     address: str
     via: str = "direct"   # "controller": only the controller sees it (relayed, rev 9)
+    via_ip: bool = False  # found only by asking an extra IP (rev 12.2 §3.10)
 
 
-def parse_discover(messages: Iterable[str]) -> tuple[list[Source] | None, bool]:
-    """(sources, busy) from the lines after an ndi/discover. `sources` is
-    None until the "done" line arrives. Names may contain " @ ": split on
-    the LAST one."""
+@dataclass
+class Discovery:
+    """What one ndi/discover answered (rev 12.2)."""
+    sources: list[Source] | None = None   # None until "done" (or a terminal refusal)
+    busy: bool = False
+    bad_ips: str | None = None             # the VC refused the ips argument
+    ips_capable: bool | None = None        # its "started" line carried " ips=<n>"
+
+
+def parse_discovery(messages: Iterable[str]) -> Discovery:
+    """The lines after an ndi/discover. Names may contain " @ ": split on the
+    LAST one. Rev 12.2: "(ip)" after the address = found only through an
+    extra IP; "bad ips" is terminal; " ips=<n>" on "started" = the VC can
+    search by IP."""
+    d = Discovery()
     found: list[Source] = []
-    busy = False
     for msg in messages:
         if not msg.startswith(_DISCOVER_PREFIX):
             continue
         if msg == "NDI discover: busy":
-            busy = True
+            d.busy = True
             continue
         if _DONE_RE.match(msg):
-            return sorted(found, key=lambda s: s.name.lower()), busy
+            d.sources = sorted(found, key=lambda s: s.name.lower())
+            return d
         body = msg[len(_DISCOVER_PREFIX):]
-        if body.startswith("started (") or body.startswith("unavailable") or body.startswith("aborted"):
+        if body.startswith("bad ips "):
+            d.bad_ips = body[len("bad ips "):]
+            d.sources = []
+            return d
+        if body.startswith("started ("):
+            d.ips_capable = " ips=" in body
+            continue
+        if body.startswith("unavailable") or body.startswith("aborted"):
             continue
         name, sep, addr = body.rpartition(" @ ")
         if sep and name:
-            found.append(Source(name=name, address="" if addr == "-" else addr))
-    return None, busy
+            via_ip = addr.endswith(" (ip)")
+            if via_ip:
+                addr = addr[:-len(" (ip)")]
+            found.append(Source(name=name, address="" if addr == "-" else addr, via_ip=via_ip))
+    return d
+
+
+def parse_discover(messages: Iterable[str]) -> tuple[list[Source] | None, bool]:
+    """(sources, busy): the rev 8 shape, kept for callers that need no more."""
+    d = parse_discovery(messages)
+    return d.sources, d.busy
+
+
+def check_host_ip(value: Any, own: Iterable[str] = ()) -> str:
+    """One extra IP for the controller's discovery, normalised; PreviewError
+    400 bad_ip otherwise (rev 12.2 §3.10). Dotted unicast IPv4 only: the VC's
+    address form and the relay are IPv4, and a comma would smuggle a second
+    entry past the cap."""
+    text = str(value or "").strip()
+    if not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", text):
+        raise PreviewError(400, "bad_ip", ip=text[:40])
+    try:
+        ip = ipaddress.IPv4Address(text)
+    except ValueError:
+        raise PreviewError(400, "bad_ip", ip=text[:40])
+    if (ip.is_loopback or ip.is_multicast or ip.is_unspecified
+            or ip == ipaddress.IPv4Address("255.255.255.255") or str(ip) in set(own)):
+        raise PreviewError(400, "bad_ip", ip=str(ip), hint="not a sender's unicast address")
+    return str(ip)
+
+
+async def own_ipv4() -> list[str]:
+    """The controller's own IPv4 addresses (`ip -o -4 addr`)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ip", "-o", "-4", "addr", "show",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+    except (OSError, asyncio.TimeoutError):
+        return []
+    return re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)/", out.decode(errors="replace"))
+
+
+async def tcp_reachable(address: str, timeout: float = PRECHECK_S) -> bool:
+    """Does "ip:port" accept a TCP connection within timeout?"""
+    host, _, port = address.rpartition(":")
+    if not host or not port.isdigit():
+        return False
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port)), timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
 
 
 def parse_outputs(messages: Iterable[str]) -> list[dict]:
@@ -536,6 +613,7 @@ class _Request:
     def public(self, with_upstream: bool = True) -> dict:
         out = {"screen": self.screen.public(), "source": self.source, "mode": self.mode,
                "route": "relay" if self.relay else "direct",
+               "by_ip": self.filepath.startswith("ndi://@") and self.relay is None,
                "machine_address": self.target.address,
                "confirm": self.verdict.state, "reason": self.verdict.reason,
                "detail": self.verdict.detail,
@@ -555,9 +633,11 @@ class SeenSource:
     """One source in the cluster-wide list: who sees it, and at what address."""
     name: str
     seen_by: dict[str, str]      # machine -> "ip:port" ("" when unknown)
+    via_ip: bool = False         # the controller found it only through an extra IP
 
     def public(self, n: int, size: dict | None = None) -> dict:
-        return {"n": n, "name": self.name, "seen_by": sorted(self.seen_by), "size": size}
+        return {"n": n, "name": self.name, "seen_by": sorted(self.seen_by), "size": size,
+                "via_ip": self.via_ip}
 
 
 class NdiPreview:
@@ -593,6 +673,19 @@ class NdiPreview:
             log.warning("ndi-preview: ndi_journal_stale_s is not an integer; using %d",
                         JOURNAL_STALE_S)
             self.journal_stale_s = JOURNAL_STALE_S
+        self._hosts_page: list[str] = []                 # added from the page/API (in memory)
+        self._hosts_cfg: list[str] = []                  # ndi_hosts in power-bridge.conf
+        for item in str(self.cfg.extras.get("ndi_hosts", "")).split(","):
+            if not item.strip():
+                continue
+            try:
+                ip = check_host_ip(item)
+            except PreviewError:
+                log.warning("ndi-preview: ndi_hosts entry %r ignored (not a unicast IPv4)", item)
+                continue
+            if ip not in self._hosts_cfg and len(self._hosts_cfg) < MAX_HOSTS:
+                self._hosts_cfg.append(ip)
+        self._ips_capable: bool | None = None            # the controller VC's last "started" line
         self.health = HealthMonitor(self._machine_ips, self._journal_age,
                                     lambda: guard(self.bridge.engine, False) is not None)
 
@@ -690,6 +783,12 @@ class NdiPreview:
                                 journal_age_s=round(h.journal_age_s or 0))
         return None
 
+    def hosts(self) -> list[str]:
+        """Extra IPs for the controller's discovery: config first, then page."""
+        out = list(self._hosts_cfg)
+        out += [ip for ip in self._hosts_page if ip not in out]
+        return out[:MAX_HOSTS]
+
     def machines_public(self) -> dict:
         return {("controller" if k == "local" else k): {
                     **h.public(), "journal_stale": self._stale(k)}
@@ -757,8 +856,10 @@ class NdiPreview:
                 continue
             answered += 1
             for src in lst:
-                seen.setdefault(src.name, SeenSource(src.name, {})).seen_by[
-                    "controller" if m == "local" else m] = src.address
+                entry = seen.setdefault(src.name, SeenSource(src.name, {}))
+                entry.seen_by["controller" if m == "local" else m] = src.address
+                if m == "local" and src.via_ip:
+                    entry.via_ip = True
         if not answered:
             raise PreviewError(504, "no_vc_answer",
                                hint="no videocomposer answered ndi/discover (older than 0.1.2-7?)")
@@ -777,15 +878,25 @@ class NdiPreview:
     async def _discover(self, target: Target, seconds: int) -> list[Source]:
         self.journal.check_readable(target)
         mark = await self.journal.mark(target)
-        self._send(target, "/videocomposer/ndi/discover", seconds)
+        # Extra IPs go to the controller's VC only: the nodes cannot route
+        # there anyway (rev 12.2 §3.10).
+        hosts = self.hosts() if target.local else []
+        if hosts:
+            self._send(target, "/videocomposer/ndi/discover", seconds, ",".join(hosts))
+        else:
+            self._send(target, "/videocomposer/ndi/discover", seconds)
         deadline = time.monotonic() + seconds + 5
         while time.monotonic() < deadline:
             await asyncio.sleep(POLL_S)
             msgs = await self.journal.read(target, mark)
-            found, busy = parse_discover(msgs)
-            if found is not None:
-                self._sources_cache[target.address] = (time.monotonic(), found)
-                return found
+            d = parse_discovery(msgs)
+            if target.local and d.ips_capable is not None:
+                self._ips_capable = d.ips_capable
+            if d.bad_ips is not None:
+                log.warning("ndi-preview: the controller VC refused the ips list: %s", d.bad_ips)
+            if d.sources is not None:
+                self._sources_cache[target.address] = (time.monotonic(), d.sources)
+                return d.sources
         if target.local:
             found = await self._legacy_discover(seconds)
             if found is not None:
@@ -867,6 +978,11 @@ class NdiPreview:
             name, address, route = await self._route_for(target, screen, source_arg)
             if route == "relay":
                 await self._relay_preconditions(target, address)
+            if route == "address":
+                # The VC cannot report an unreachable address: check first.
+                if not address or not await tcp_reachable(address):
+                    raise PreviewError(502, "source_unreachable", address=address,
+                                       hint="the controller cannot open the source's stream port")
             err = guard(self.bridge.engine, self.bridge.auto_load_active(), force_unknown_engine)
             if err:
                 raise err
@@ -876,7 +992,7 @@ class NdiPreview:
             # The screen's previous relay goes only after its unload, so the
             # old layer does not sit reconnecting to a closed port.
             await self._close_relay(key, "replaced")
-            filepath = f"ndi://{name}"
+            filepath = f"ndi://@{address}" if route == "address" else f"ndi://{name}"
             if route == "relay":
                 new_relay = await self._open_relay(target, key, address)
                 filepath = f"ndi://@{new_relay.address}"
@@ -917,7 +1033,10 @@ class NdiPreview:
         own = self._sources_cache.get(target.address)
         if (is_exact_name(arg) and own and time.monotonic() - own[0] < SOURCES_CACHE_S
                 and any(s.name == arg for s in own[1])):
-            return arg, next(s.address for s in own[1] if s.name == arg), "direct"
+            src = next(s for s in own[1] if s.name == arg)
+            # A by-IP source is invisible to the VC's own receiver finder:
+            # load it by address, never by name (rev 12.2 B1).
+            return arg, src.address, ("address" if src.via_ip else "direct")
         machine = "controller" if target.local else target.key
         listed = await self.sources()
         if arg.startswith("#"):
@@ -939,6 +1058,8 @@ class NdiPreview:
                 raise PreviewError(404, "source_not_found",
                                    hint=f"no machine of the cluster sees {name!r}")
         if machine in entry.seen_by:
+            if entry.via_ip and target.local:
+                return entry.name, entry.seen_by[machine], "address"
             return entry.name, entry.seen_by[machine], "direct"
         if target.local:
             raise PreviewError(404, "source_not_found",
@@ -1138,6 +1259,8 @@ class NdiPreview:
         app.router.add_get("/ndi", self.h_page_redirect)
         app.router.add_get("/ndi/", self.h_page)
         app.router.add_get("/ndi/sources", self.h_sources)
+        app.router.add_get("/ndi/hosts", self.h_hosts_get)
+        app.router.add_post("/ndi/hosts", self.h_hosts)
         app.router.add_get("/ndi/outputs", self.h_outputs)
         app.router.add_post("/ndi/preview", self.h_preview)
         app.router.add_post("/ndi/stop", self.h_stop)
@@ -1213,6 +1336,79 @@ class NdiPreview:
                 continue
             out[req.source] = {"w": size[0], "h": size[1], "fps": req.verdict.fps}
         return out
+
+    def _hosts_public(self) -> list[dict]:
+        return ([{"ip": ip, "from": "config"} for ip in self._hosts_cfg]
+                + [{"ip": ip, "from": "page"} for ip in self._hosts_page
+                   if ip not in self._hosts_cfg])
+
+    async def h_hosts_get(self, request: web.Request) -> web.Response:
+        if (r := self._gate(request, "ndi_hosts_get")):
+            return r
+        return web.json_response({"ok": True, "hosts": self._hosts_public(),
+                                  "ips_capable": self._ips_capable})
+
+    async def _rediscover_controller(self) -> list[Source]:
+        """A fresh controller discovery with the current host list: wait for
+        any in-flight one (the VC would answer a second "busy"), then drop
+        the cache and run again."""
+        target = await self.resolve_target("local")
+        task = self._discovering.get(target.address)
+        if task is not None and not task.done():
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                pass
+        self._sources_cache.pop(target.address, None)
+        return await self._list(target)
+
+    async def h_hosts(self, request: web.Request) -> web.Response:
+        """POST {"ip": …} adds an extra IP (rev 12.2 §3.10); {"ip": …,
+        "remove": true} drops a page-added one. Adding runs a fresh controller
+        discovery and answers what that IP gave."""
+        if (r := self._gate(request, "ndi_hosts")):
+            return r
+        try:
+            body = await self._body(request)
+            ip = check_host_ip(body.get("ip"), await own_ipv4())
+            peer = request.remote or "?"
+            if body.get("remove"):
+                if ip in self._hosts_cfg:
+                    raise PreviewError(409, "host_from_config", ip=ip)
+                if ip in self._hosts_page:
+                    self._hosts_page.remove(ip)
+                    log.info("ndi-preview: host %s removed by %s", ip, peer)
+                    if guard(self.bridge.engine, False) is None:
+                        self._sources_cache.pop("127.0.0.1", None)
+                return web.json_response({"ok": True, "hosts": self._hosts_public()})
+            err = guard(self.bridge.engine, False)
+            if err:
+                raise err
+            if ip not in self.hosts():
+                if len(self.hosts()) >= MAX_HOSTS:
+                    raise PreviewError(409, "too_many_hosts", max=MAX_HOSTS)
+                self._hosts_page.append(ip)
+                log.info("ndi-preview: host %s added by %s", ip, peer)
+            try:
+                found = await self._rediscover_controller()
+            except PreviewError:
+                if ip in self._hosts_page:
+                    self._hosts_page.remove(ip)
+                raise
+            if self._ips_capable is False:
+                if ip in self._hosts_page:
+                    self._hosts_page.remove(ip)
+                raise PreviewError(409, "hosts_need_controller_vc",
+                                   hint="the controller's videocomposer cannot search by IP")
+            prefix = ip + ":"
+            # A sender may answer from another of its NICs: report what this
+            # IP gave, and every by-IP source, so the page judges with both.
+            from_ip = [s.name for s in found if s.via_ip and s.address.startswith(prefix)]
+            any_ip = [s.name for s in found if s.via_ip]
+        except PreviewError as e:
+            return self._fail(e)
+        return web.json_response({"ok": True, "hosts": self._hosts_public(),
+                                  "ip": ip, "found": from_ip, "found_by_ip": any_ip})
 
     async def h_outputs(self, request: web.Request) -> web.Response:
         if (r := self._gate(request, "ndi_outputs")):

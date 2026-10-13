@@ -69,6 +69,11 @@ ul.sources input { margin-top: 4px; width: 20px; height: 20px; flex: none; }
 .card.absent { background: var(--absent); }
 .card.down { border-color: var(--bad); }
 .health { color: var(--bad); margin: 0; }
+input[type=text] { font: inherit; padding: 8px; min-height: 44px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--fg); flex: 1 1 180px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--card); }
+.chip button { min-height: 0; padding: 2px 8px; }
 .now { margin: 0; overflow-wrap: anywhere; }
 .now.frames { color: var(--ok); }
 .now.failed { color: var(--bad); }
@@ -86,6 +91,13 @@ footer { margin-top: 32px; }
     <button id="refresh" type="button">Buscar fuentes</button>
     <span id="sources-msg" class="muted" aria-live="polite"></span>
   </div>
+  <div class="row msg">
+    <input id="host-ip" type="text" inputmode="decimal" autocomplete="off"
+           aria-label="IP de un equipo en otra red" placeholder="IP de un equipo en otra red">
+    <button id="host-add" type="button">Añadir equipo por IP</button>
+    <span id="hosts-msg" class="muted" aria-live="polite"></span>
+  </div>
+  <div id="hosts" class="row msg"></div>
   <ul id="sources" class="sources msg" role="radiogroup" aria-label="Fuentes NDI"></ul>
 
   <h2>Pantallas</h2>
@@ -145,6 +157,11 @@ const REASONS = {
   journal_stale: "La máquina está en la red pero su journal no llega: no se puede previsualizar ni confirmar",
   no_vc_reply: "El videocomposer no contesta",
   vc_down: "El videocomposer está parado",
+  bad_ip: "Eso no es la IP de un equipo (IPv4, p. ej. 10.20.0.15)",
+  too_many_hosts: "Ya hay 8 equipos añadidos por IP",
+  host_from_config: "Esa IP viene de la configuración del bridge y no se quita desde aquí",
+  hosts_need_controller_vc: "El videocomposer del controller no sabe buscar por IP: hay que actualizarlo",
+  source_unreachable: "El controller no llega al puerto de vídeo del emisor",
   network: "Sin conexión con el bridge",
   bad_reply: "Respuesta del bridge ilegible"
 };
@@ -218,6 +235,7 @@ function fmtSize(size, fps) {
 function sayErr(data) {
   let t = say(data.reason);
   if (data.machine) { t = data.machine + ": " + t; }
+  if (data.reason === "bad_ip" && data.ip) { t += " — " + data.ip; }
   if (data.reason === "journal_stale" && data.journal_age_s) {
     t += " (desde hace " + Math.round(data.journal_age_s / 60) + " min)";
   }
@@ -337,11 +355,69 @@ function renderSources() {
     text.append(el("br"));
     let seen = "visto por: " + (s.seen_by || []).join(", ");
     if (s.size) { seen += " · " + fmtSize(s.size, s.size.fps); }   // only while on some screen
+    if (s.via_ip) { seen += " · por IP"; }
     text.append(el("span", "muted", seen));
     label.append(radio, text);
     li.append(label);
     ul.append(li);
   }
+}
+
+// ---------------- hosts by IP (rev 12.2 §3.10) ----------------
+
+let hostList = [];
+const hostNotes = new Map();   // ip -> what its last search gave
+
+async function loadHosts() {
+  const d = await api("GET", "hosts");
+  if (d.ok) { hostList = d.hosts || []; renderHosts(); }
+}
+
+function renderHosts() {
+  const box = $("hosts");
+  box.replaceChildren();
+  for (const h of hostList) {
+    const chip = el("span", "chip");
+    chip.append(el("span", null, h.ip));
+    if (h.from === "config") {
+      chip.append(el("span", "muted", "configuración"));
+    } else {
+      const x = el("button", null, "Quitar");
+      x.type = "button";
+      x.addEventListener("click", () => removeHost(h.ip));
+      chip.append(x);
+    }
+    const note = hostNotes.get(h.ip);
+    if (note) { chip.append(el("span", "muted", note)); }
+    box.append(chip);
+  }
+}
+
+async function addHost() {
+  const ip = $("host-ip").value.trim();
+  if (!ip || blocked !== null) { return; }
+  $("host-add").disabled = true;
+  $("hosts-msg").textContent = "Buscando en " + ip + "…";
+  const d = await api("POST", "hosts", { ip });
+  $("host-add").disabled = false;
+  if (!d.ok) { $("hosts-msg").textContent = sayErr(d); return; }
+  $("hosts-msg").textContent = "";
+  $("host-ip").value = "";
+  hostList = d.hosts || [];
+  const n = (d.found || []).length;
+  hostNotes.set(d.ip, n ? n + (n === 1 ? " fuente" : " fuentes")
+    : ((d.found_by_ip || []).length ? "" : "sin fuentes NDI o no se llega"));
+  renderHosts();
+  loadSources();
+}
+
+async function removeHost(ip) {
+  const d = await api("POST", "hosts", { ip, remove: true });
+  if (!d.ok) { $("hosts-msg").textContent = sayErr(d); return; }
+  hostList = d.hosts || [];
+  hostNotes.delete(ip);
+  renderHosts();
+  loadSources();
 }
 
 // ---------------- screens ----------------
@@ -506,6 +582,7 @@ function startTimers() {
 
 async function refreshAll() {
   await pollStatus();
+  await loadHosts();
   await loadOutputs();
   await loadSources();
 }
@@ -520,6 +597,8 @@ document.addEventListener("visibilitychange", () => {
 });
 
 $("refresh").addEventListener("click", loadSources);
+$("host-add").addEventListener("click", addHost);
+$("host-ip").addEventListener("keydown", (e) => { if (e.key === "Enter") { addHost(); } });
 $("stop-all").addEventListener("click", doStopAll);
 
 refreshAll();
