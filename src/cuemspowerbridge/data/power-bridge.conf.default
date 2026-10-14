@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+#
 # cuems-power-bridge default configuration
 # Shipped at /usr/share/cuems/power-bridge.conf.default; the bridge falls
 # back to these values when /etc/cuems/power-bridge.conf is missing.
@@ -72,6 +76,18 @@ auto_load_armed_timeout_s = 150           # wait for armed==yes (> engine's 120 
 auto_load_max_attempts = 5                # soft attempts, then 30 s self-heal cadence (never disables)
 # Note: nng_hub_port is NOT configured here — it is read from
 # <nng_hub_port> in /etc/cuems/settings.xml (single source of truth).
+#
+# Operator loads/unloads (POST /loadproject, /unloadproject) and auto-load:
+# loading ANOTHER project, or unloading, suspends auto-load until the bridge
+# restarts (otherwise a persistent loop would reload behind the operator).
+# Loading the auto_load_project itself keeps auto-load and counts as its
+# load. /status.auto_load.disabled_reason says why auto-load stopped.
+
+# --- Load / unload over HTTP (POST /loadproject, /unloadproject) ---
+# How long one operation is tracked before /status reports it overdue (and a
+# ?wait=1 caller gets 504). Covers the editor's worst case (a media re-index,
+# ~6 min) plus arming. Clamped to 60..3600; an invalid value means 450.
+project_op_timeout_s = 450
 
 # --- Operational ---
 dry_run = false                           # true = log side-effects without executing

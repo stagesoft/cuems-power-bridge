@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 
 SYSTEM_CONFIG = "/etc/cuems/power-bridge.conf"
 
+# Once-per-process warnings from lenient accessors.
+_warned: dict[str, bool] = {}
+
 
 @dataclass
 class Config:
@@ -56,6 +59,13 @@ class Config:
     auto_load_node_settle_s: int = 10    # small margin after bus-connect before loading
     auto_load_armed_timeout_s: int = 150  # wait for armed==yes (> engine's 120 s arm watchdog)
     auto_load_max_attempts: int = 5      # soft attempts, then slow-cadence self-heal retries
+
+    # POST /loadproject + /unloadproject (plan 869fghmxn): how long one
+    # operation is tracked before it is reported overdue — it covers the
+    # editor's worst case (media re-index, ~370 s) plus arming. Kept as a raw
+    # string and read through op_budget_s(), so a typo never makes
+    # config.load() raise (cuems-common's tools load this file too).
+    project_op_timeout_s: str = "450"
 
     # NNG hub port the node-engines connect to. NOT a conf knob: resolved
     # from <nng_hub_port> in settings.xml at load() time (single source of
@@ -101,6 +111,19 @@ class Config:
     projector_command_timeout_s: float = 5.0
 
     extras: dict = field(default_factory=dict)
+
+    def op_budget_s(self) -> int:
+        """`project_op_timeout_s` as an int clamped to 60..3600; an invalid
+        value falls back to 450 (one WARNING per process)."""
+        try:
+            value = int(str(self.project_op_timeout_s).strip())
+        except ValueError:
+            if not _warned.get("project_op_timeout_s"):
+                _warned["project_op_timeout_s"] = True
+                log.warning("config: project_op_timeout_s=%r is not a number; "
+                            "using 450", self.project_op_timeout_s)
+            return 450
+        return max(60, min(3600, value))
 
     def node_ids_list(self) -> list[str]:
         """Parse `auto_load_node_ids` CSV → stripped, blank-free role_ids."""

@@ -103,6 +103,28 @@ async def hub_connected_ips(hub_port: int) -> set[str]:
     return _peer_ips(await _run_ss(), hub_port)
 
 
+async def hub_peers_or_none(hub_port: int) -> set[str] | None:
+    """Like hub_connected_ips(), but None when ``ss`` itself failed (missing
+    binary, timeout, any OS error). The load gate must not read a failed probe
+    as "no node is on the bus" — that would refuse every load (plan 869fghmxn
+    D11: a bus state that can't be established never refuses)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ss", "-Htn", "state", "established",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except (OSError, asyncio.TimeoutError) as e:
+        log.warning("cluster_bus: ss failed (%s); bus state unknown",
+                    type(e).__name__)
+        return None
+    if proc.returncode != 0:
+        log.warning("cluster_bus: ss exited %s; bus state unknown", proc.returncode)
+        return None
+    return _peer_ips(out.decode("utf-8", "replace"), hub_port)
+
+
 async def wait_until_engines_on_bus(
     expected_ips: set[str],
     hub_port: int,

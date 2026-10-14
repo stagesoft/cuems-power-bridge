@@ -32,6 +32,9 @@ class Node:
     hostname: str | None
     node_type: str | None  # "NodeType.master" | "NodeType.slave" | None
     ip: str | None = None  # operator-maintained cluster IP (see slave_ips)
+    # <adopted>, read as the engine reads it (_adopted_uuids_from_network_map):
+    # true/1/yes, case-insensitive; absent means NOT adopted.
+    adopted: bool = False
 
 
 def _text(parent: ET.Element, *names: str) -> str | None:
@@ -93,6 +96,7 @@ def parse(path: str) -> list[Node]:
                 hostname=hostname,
                 node_type=_text(el, "node_type"),
                 ip=_text(el, "ip"),
+                adopted=(_text(el, "adopted") or "").lower() in ("true", "1", "yes"),
             )
         )
     return nodes

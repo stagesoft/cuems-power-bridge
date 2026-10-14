@@ -22,6 +22,7 @@ Bridge guarantees:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Callable
 
@@ -53,6 +54,21 @@ class EngineClient:
         # disconnect too (the late-join dump re-sends them). Empty against an
         # older engine.
         self.cue_names: dict[str, str] = {}
+        # True only for an arm that followed a LOAD on this connection, with no
+        # run since (plan 869fghmxn D15): a `load` frame with a name, then an
+        # `armed` frame "yes" after a non-"yes" value. The engine's re-arm
+        # after STOP (no `load` frame) is not fresh, nor is a reconnect dump
+        # (it sends `armed` before `load`). Cleared by running=="yes", by any
+        # further `load` frame and by a disconnect.
+        self.fresh_arm: bool = False
+        self._pending_load_arm: bool = False
+        # Last /engine/status/cluster_warning (cuems-engine rc_1+ only), parsed:
+        # {"load_id", "project", "missing", "unreachable"}. None until one is
+        # seen on this connection; reset by `load` frames and on disconnect.
+        # `cluster_warning_seen` tells an engine that publishes it (it always
+        # does, even with empty lists) from a released one that never does.
+        self.cluster_warning: dict | None = None
+        self.cluster_warning_seen: bool = False
         self.connected: bool = False
         # Listeners called on every status update: cb(key, value).
         self._listeners: list[Callable[[str, Any], None]] = []
@@ -163,6 +179,10 @@ class EngineClient:
                 self.load = UNKNOWN
                 self.nextcue = UNKNOWN
                 self.cue_names = {}
+                self.fresh_arm = False
+                self._pending_load_arm = False
+                self.cluster_warning = None
+                self.cluster_warning_seen = False
                 # Fire disconnect listeners only on a real drop (we were
                 # connected), not on failed connect attempts.
                 if was_connected:
@@ -191,24 +211,55 @@ class EngineClient:
             address, args = parsed
             value = args[0] if args else None
             if address.startswith("/engine/status/"):
-                key = address[len("/engine/status/"):]
-                # Top-level fields are flat strings; nested paths (cue/...,
-                # cue_enabled/..., audio/...) we don't track in the cache.
-                if key == "load":
-                    new_load = str(value) if value is not None else ""
-                    if new_load != self.load:
-                        # New load (or none): new name table. The engine's
-                        # cue_name burst follows this message.
-                        self.cue_names = {}
-                if key in ("running", "armed", "load", "nextcue"):
-                    setattr(self, key, str(value) if value is not None else "")
-                    log.debug("engine status %s=%r", key, value)
-                elif key.startswith("cue_name/"):
-                    self.cue_names[key[len("cue_name/"):]] = (
-                        str(value) if value is not None else ""
-                    )
-                for cb in self._listeners:
-                    try:
-                        cb(key, value)
-                    except Exception as e:
-                        log.error("status listener crashed: %s", e)
+                self._apply_status(address[len("/engine/status/"):], value)
+
+    def _apply_status(self, key: str, value: Any) -> None:
+        """Update the cache from one /engine/status/<key> frame, then tell the
+        listeners (they read the updated cache)."""
+        # Top-level fields are flat strings; nested paths (cue/...,
+        # cue_enabled/..., audio/...) we don't track in the cache.
+        if key == "load":
+            new_load = str(value) if value is not None else ""
+            if new_load != self.load:
+                # New load (or none): new name table. The engine's
+                # cue_name burst follows this message.
+                self.cue_names = {}
+            self._pending_load_arm = new_load != ""
+            self.fresh_arm = False
+            self.cluster_warning = None
+        elif key == "armed":
+            new_armed = str(value) if value is not None else ""
+            if (new_armed == "yes" and self.armed != "yes"
+                    and self._pending_load_arm):
+                self.fresh_arm = True
+                self._pending_load_arm = False
+        elif key == "running" and value == "yes":
+            self.fresh_arm = False
+            self._pending_load_arm = False
+        elif key == "cluster_warning":
+            self.cluster_warning_seen = True
+            self.cluster_warning = _parse_cluster_warning(value)
+        if key in ("running", "armed", "load", "nextcue"):
+            setattr(self, key, str(value) if value is not None else "")
+            log.debug("engine status %s=%r", key, value)
+        elif key.startswith("cue_name/"):
+            self.cue_names[key[len("cue_name/"):]] = (
+                str(value) if value is not None else ""
+            )
+        for cb in self._listeners:
+            try:
+                cb(key, value)
+            except Exception as e:
+                log.error("status listener crashed: %s", e)
+
+def _parse_cluster_warning(value: Any) -> dict | None:
+    """The engine sends the load diagnosis as a JSON string (OSC carries no
+    lists). Anything unparseable is treated as no diagnosis."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        obj = json.loads(value)
+    except ValueError:
+        log.debug("unparseable cluster_warning: %r", value[:120])
+        return None
+    return obj if isinstance(obj, dict) else None
