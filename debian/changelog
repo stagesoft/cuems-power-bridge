@@ -1,4 +1,4 @@
-cuems-power-bridge (0.3.0-11) UNRELEASED; urgency=medium
+cuems-power-bridge (0.3.0-11) unstable; urgency=medium
 
   * NDI preview (plan 869ekxuez rev 12.2): sizes and machine health.
     - Each screen reports its mode and region; each preview its source size
@@ -38,7 +38,7 @@ cuems-power-bridge (0.3.0-11) UNRELEASED; urgency=medium
     - NDI preview refuses while a load is tracked (project_op_in_progress).
     - New key project_op_timeout_s (default 450).
 
- -- Ion Reguera <ion@stagelab.coop>  Tue, 13 Oct 2026 13:30:04 +0200
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 14 Oct 2026 18:41:50 +0200
 
 cuems-power-bridge (0.3.0-10) unstable; urgency=medium
 
