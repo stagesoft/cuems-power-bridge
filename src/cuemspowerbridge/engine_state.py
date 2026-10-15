@@ -74,6 +74,12 @@ class EngineClient:
         self._listeners: list[Callable[[str, Any], None]] = []
         # Listeners called once each time an established connection drops.
         self._disconnect_listeners: list[Callable[[], None]] = []
+        # Raw-frame listeners, cb(address, raw_bytes), for every
+        # /engine/status/* frame BEFORE the cache and on_status see it (the
+        # Companion relay forwards the exact bytes); connect listeners, cb(),
+        # once per established connection, before its first frame.
+        self._frame_listeners: list[Callable[[str, bytes], None]] = []
+        self._connect_listeners: list[Callable[[], None]] = []
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -88,6 +94,17 @@ class EngineClient:
         connection-scoped state so a reconnect's status dump is treated as
         fresh."""
         self._disconnect_listeners.append(cb)
+
+    def on_frame(self, cb: Callable[[str, bytes], None]) -> None:
+        """Register a listener called with (address, raw bytes) for every
+        /engine/status/* frame, in arrival order, before the cache is updated
+        and before the on_status listeners run. It must not block."""
+        self._frame_listeners.append(cb)
+
+    def on_connect(self, cb: Callable[[], None]) -> None:
+        """Register a listener fired once each time a WS connection is
+        established, before the first frame of that connection."""
+        self._connect_listeners.append(cb)
 
     def is_known(self) -> bool:
         """True iff connected AND we have the on-connect state dump."""
@@ -163,6 +180,11 @@ class EngineClient:
                     self.connected = True
                     backoff = 1  # reset on successful connection
                     log.info("engine WS connected: %s", self.ws_url)
+                    for cb in self._connect_listeners:
+                        try:
+                            cb()
+                        except Exception as e:
+                            log.error("connect listener crashed: %s", e)
                     await self._consume(ws)
             except (ConnectionClosed, ConnectionRefusedError, OSError) as e:
                 log.info("engine WS disconnected (%s); reconnect in %ds",
@@ -205,12 +227,18 @@ class EngineClient:
             if not isinstance(msg, (bytes, bytearray)):
                 # Engine may emit JSON for OSCQuery — ignore.
                 continue
-            parsed = parse_osc_message(bytes(msg))
+            raw = bytes(msg)
+            parsed = parse_osc_message(raw)
             if parsed is None:
                 continue
             address, args = parsed
             value = args[0] if args else None
             if address.startswith("/engine/status/"):
+                for cb in self._frame_listeners:
+                    try:
+                        cb(address, raw)
+                    except Exception as e:
+                        log.error("frame listener crashed: %s", e)
                 self._apply_status(address[len("/engine/status/"):], value)
 
     def _apply_status(self, key: str, value: Any) -> None:

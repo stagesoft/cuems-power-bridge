@@ -67,6 +67,16 @@ class Config:
     # config.load() raise (cuems-common's tools load this file too).
     project_op_timeout_s: str = "450"
 
+    # Companion cue-status relay (osc_relay.py): /engine/status/* re-sent over
+    # UDP OSC to Companion's Generic OSC module. All five are raw strings,
+    # parsed by OscRelay.from_config(), so no value here can make
+    # config.load() raise. Empty targets = relay off (the default).
+    osc_relay_targets: str = ""
+    osc_relay_listen: str = "127.0.0.1:8478"
+    osc_relay_keys: str = "cue/,running,armed,load,nextcue"
+    osc_relay_refresh_s: str = "0"
+    osc_relay_rate: str = "250"
+
     # NNG hub port the node-engines connect to. NOT a conf knob: resolved
     # from <nng_hub_port> in settings.xml at load() time (single source of
     # truth — a separate knob could drift from the engine's actual port).
