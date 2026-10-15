@@ -27,6 +27,7 @@ from .editor_client import EditorClient
 from .engine_state import UNKNOWN, EngineClient
 from .ndi_preview import NdiPreview
 from .node_executor import SshTarget, poweroff_all
+from .osc_relay import OscRelay, disabled_status
 from .project_ops import Op, ProjectOps
 from .reachability import wait_until_all_down
 from .shelly import ShellyClient, ShellyError
@@ -138,6 +139,15 @@ class Bridge:
         self.projects = ProjectOps(self)
         # NDI preview during montajes (/ndi/*, cuems-ndi-preview).
         self.ndi = NdiPreview(self)
+        # Companion cue-status relay (UDP OSC). None when off; a failure here
+        # only disables the relay, never the bridge.
+        self.osc_relay: OscRelay | None = None
+        self._osc_relay_error: str | None = None
+        try:
+            self.osc_relay = OscRelay.from_config(cfg, self.engine)
+        except Exception as e:
+            self._osc_relay_error = f"from_config: {type(e).__name__}: {e}"
+            log.error("osc relay disabled: %s", self._osc_relay_error)
 
     # ------------------- state machine -------------------
 
@@ -189,7 +199,18 @@ class Bridge:
             "project_loaded": self.engine.load if self.engine.load != UNKNOWN else "",
             "project_op": self.projects.status(),
             "auto_load": self.auto_load_state(),
+            "osc_relay": self._osc_relay_status(),
         }
+
+    def _osc_relay_status(self) -> dict:
+        """Isolated: /status must answer 200 whatever the relay does (Companion
+        and cuems-displays-on poll it)."""
+        try:
+            if self.osc_relay is None:
+                return disabled_status(self.cfg, self._osc_relay_error)
+            return self.osc_relay.stats()
+        except Exception as e:
+            return {"enabled": True, "error": type(e).__name__}
 
     # ------------------- HTTP handlers -------------------
 
@@ -1148,7 +1169,29 @@ class Bridge:
 
     # ------------------- lifecycle -------------------
 
+    async def _start_osc_relay(self) -> None:
+        """Hooks and relay start BEFORE the engine client starts, so the first
+        connect and its dump reach the relay."""
+        relay = self.osc_relay
+        if relay is None or not relay.enabled:
+            return
+        try:
+            await relay.start()
+        except Exception as e:
+            relay.enabled = False
+            relay.last_error = f"start: {type(e).__name__}: {e}"
+            log.error("osc relay disabled: %s", relay.last_error)
+            try:
+                await relay.close()
+            except Exception:
+                pass
+            return
+        self.engine.on_frame(relay.on_frame)
+        self.engine.on_connect(relay.on_engine_connect)
+        self.engine.on_disconnect(relay.on_engine_disconnect)
+
     async def start(self) -> web.AppRunner:
+        await self._start_osc_relay()
         await self.engine.start()
         await self.editor.start()
         # Load/unload operations follow the engine on every box, whatever the
@@ -1203,4 +1246,11 @@ class Bridge:
         await self._cancel_projector_off_task()
         await self.ndi.close()
         await self.engine.stop()
+        # After engine.stop() (which fired the disconnect path: resets and
+        # engine_connected 0), flush within 0.5 s.
+        if self.osc_relay is not None:
+            try:
+                await self.osc_relay.close()
+            except Exception as e:
+                log.error("osc relay close: %s", e)
         await self.editor.stop()
