@@ -1,3 +1,20 @@
+cuems-power-bridge (0.3.2-1) unstable; urgency=medium
+
+  * Companion cue-status relay (PR #12, plan 2026-10-09 companion relay):
+    the engine's /engine/status/* frames (cue/, running, armed, load,
+    nextcue by default) re-sent over UDP OSC to Bitfocus Companion's
+    Generic OSC module, with integer edge pulses for cue starts and ends,
+    a hold/commit rule around loads, a heartbeat and a /status osc_relay
+    block. OFF unless osc_relay_targets is set; osc_relay_listen,
+    osc_relay_keys, osc_relay_refresh_s and osc_relay_rate are the other
+    keys, all parsed without ever failing the bridge.
+  * Default osc_relay_rate 250/s. Rate and page size are rig-measured
+    limits (Companion loses edges at 1000/s with no socket drops): keep
+    feedbacks x rate <= ~30 000 on a Companion page.
+  * Contains 0.3.1-2 (persistent auto-load re-drives only on an empty load).
+
+ -- Ion Reguera <ion@stagelab.coop>  Thu, 15 Oct 2026 20:28:39 +0200
+
 cuems-power-bridge (0.3.1-2) unstable; urgency=medium
 
   * Persistent auto-load re-drives only on an EMPTY load, as documented,
