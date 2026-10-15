@@ -59,6 +59,7 @@ It is composed of:
   - [`node_executor`](#node_executor)
   - [`reachability`](#reachability)
   - [`osc_parse`](#osc_parse)
+  - [`osc_relay`](#osc_relay)
   - [`scripts/`](#scripts)
   - [Legacy components](#legacy-components)
   - [Threading and process model](#threading-and-process-model)
@@ -76,6 +77,7 @@ It is composed of:
   - [Bootstrap on a fresh cluster](#bootstrap-on-a-fresh-cluster)
   - [Install the Shelly mJS script](#install-the-shelly-mjs-script)
   - [Configure Bitfocus Companion](#configure-bitfocus-companion)
+  - [Companion cue-status relay](#companion-cue-status-relay)
   - [Dry-run and smoke testing](#dry-run-and-smoke-testing)
 - [Development](#development)
 - [Contributors](#contributors)
@@ -267,6 +269,10 @@ Persistent binary-OSC WebSocket client for the CUEMS engine.
 * **`EngineClient.send_osc(address, value=None)`** — builds a binary OSC frame with
   `python-osc` and sends it over the WebSocket. Impulse-type args (GO, STOP) pass
   `value=None`.
+* **`EngineClient.on_frame(cb)`** / **`on_connect(cb)`** — the Companion relay's hooks:
+  `cb(address, raw_bytes)` for every `/engine/status/*` frame in arrival order, **before**
+  the cache changes and before `on_status`; `cb()` once per established connection, before
+  its first frame (never on a failed attempt). Listener exceptions are logged and isolated.
 * **`EngineClient.on_status(cb)`** — registers a listener called with `(key, value)` on
   every `/engine/status/*` broadcast.
 * **Status cache fields:** `running` (`"yes"` | `"no"` | `UNKNOWN`), `armed`
@@ -425,6 +431,45 @@ Binary OSC message parser.
   `WebSocketOscHandler.parse_osc_message` (cuems-engine) so the bridge decodes the exact
   same frames. Supports OSC type tags: `i`, `f`, `s`, `b`, `T`, `F`, `N`, `I`, `d`.
   Returns `None` on any parse failure.
+
+[↑ Back to Table of Contents](#table-of-contents)
+
+---
+
+### `osc_relay`
+
+**Module:** `src/cuemspowerbridge/osc_relay.py`
+
+Re-sends the engine's `/engine/status/*` frames to Bitfocus Companion's Generic OSC module
+over **UDP** (Companion cannot read the engine's binary-OSC WebSocket). Off unless
+`osc_relay_targets` is set. Passive: it never sends anything to the engine.
+
+* **`OscRelay.from_config(cfg, engine)`** — `None` when no targets are set. Never raises:
+  bad targets/keys give a disabled relay with `last_error`, a bad listen value disables only
+  the listener, rate/refresh clamp or fall back with one warning.
+* **Hooks** — `on_frame` (only enqueues, never does I/O), `on_engine_connect`,
+  `on_engine_disconnect`; wired by `Bridge` **before** the engine client starts.
+* **Hold / commit** — per-cue frames (`cue/`, `cue_enabled/`, `cue_name/`) are held while the
+  relay's view of `load` is unknown or `""`, and committed in order (before the `load` frame
+  itself) when a non-empty `load` arrives. This handles both engine load orders: released
+  engines (≤ rc6-3: `cue/*` → `cue_enabled/*` → `load X` → `cue_name/*`) and rc_1 / rc6-4
+  (`load ""` first).
+* **Synthesised resets** — `cue/<uuid> i 0` for every committed cue when `load` becomes `""`
+  and when the engine link drops (Generic OSC keeps a path's last value forever).
+* **Link state** — `/cuems/bridge/engine_connected i 0|1`; a change jumps the send queue, and
+  it is re-sent every 2 s as a heartbeat.
+* **Edge pulses** — `/cuems/bridge/cue_started/<uuid>` and `/cuems/bridge/cue_ended/<uuid>`,
+  each `0` → 60 ms → `1` → 150 ms → `0` (chained on actual send times, serialised per path),
+  so Companion's two debounces (≈45 ms worst case) see a clean false→true→false. Live only:
+  never from held frames, resets or within 2 s of a (re)connect.
+* **Lanes** — a state lane (coalesced by address, latest wins) and an event lane (pulses,
+  capped at 6000 sends; whole pending pulses are dropped oldest first). An event-driven drain
+  sends due events first, then state, at `osc_relay_rate` datagrams per second; idle, it
+  does not wake up. One **connected** UDP socket per target, so ICMP errors are reported.
+* **Dump** — `/cuems/bridge/dump` (no arguments) on the listen socket re-sends the cache to
+  the **configured targets only** (never the sender), at most once per second.
+* **`stats()`** — the `/status` `osc_relay` block (isolated: an error there never costs
+  `/status` its 200).
 
 [↑ Back to Table of Contents](#table-of-contents)
 
@@ -662,6 +707,7 @@ Content-Type: application/json
 | `project_loaded` | string | unix_name of the loaded project (`""` = none) |
 | `project_op` | object\|null | The last load/unload sent by the bridge (see `POST /loadproject`); `null` until the first one, and after a bridge restart |
 | `auto_load` | object | Boot auto-load: `project`, `persistent`, `done`, `disabled`, `disabled_reason` (`clobber`, `editor_errors`, `operator_load`, `operator_unload`), `active` |
+| `osc_relay` | object | Companion cue-status relay. Off: `{"enabled": false}` (+ `last_error`, `unknown_keys` when relevant). On: `enabled`, `degraded`, `last_error`, `unknown_keys`, `rate`, `refresh_s`, `keys`, `listen`, `engine_connected`, per target `sent`/`errors`/`last_error`/`last_send`/`state`, `queue_state`, `queue_events`, `events_dropped`, `held`, `held_dropped`, `cached`, `dumps_served`, `dumps_ignored`, `edges_sent`. `errors` is a lower bound (the kernel coalesces ICMP errors) |
 
 ---
 
@@ -1141,6 +1187,24 @@ auto-load until the bridge restarts; loading the `auto_load_project` itself keep
 |---|---|---|
 | `project_op_timeout_s` | `450` | How long a `/loadproject` is tracked before `/status` marks it `overdue` (and `wait=1` answers 504). Covers the editor's worst case (a media re-index) plus arming. Clamped to 60–3600; an invalid value means 450 |
 
+#### Companion cue-status relay
+
+Off unless `osc_relay_targets` is set. All five keys are read leniently: no value can stop
+the bridge (or the cuems-common tools that load this file).
+
+| Key | Default | Description |
+|---|---|---|
+| `osc_relay_targets` | `""` | CSV of `IP:port` (literal IPs only, no `.local`). Empty = relay off. A bad value disables the relay (`/status` `osc_relay.last_error`) |
+| `osc_relay_listen` | `127.0.0.1:8478` | UDP address for `/cuems/bridge/dump`; empty = no listener. A bad value (or equal to a target, or the port in use) disables only the listener |
+| `osc_relay_keys` | `cue/,running,armed,load,nextcue` | What is forwarded; `x/` is a prefix, anything else exact. Opt-in: `cue_enabled/`, `cue_name/`. Empty or bad disables the relay |
+| `osc_relay_refresh_s` | `0` | Periodic full re-send; `0` = off, else ≥ 30 (smaller values become 30; a non-number means off) |
+| `osc_relay_rate` | `1000` | Datagrams per second, 100–8000 (clamped; a non-number means 1000) |
+
+Controller only: on a node, leave `osc_relay_targets` empty (the relay would report
+`engine_connected 0` forever). UDP 8478 is used by nothing else in CUEMS (TCP 8478 is the
+bridge's HTTP). A development bridge run next to the installed one must blank `osc_relay_*`
+or move the ports.
+
 #### Operational
 
 | Key | Default | Description |
@@ -1442,6 +1506,72 @@ newer than 0.1.2-7 (otherwise the page says it must be updated).
 
 The bridge returns `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON that Companion's
 HTTP module can use to drive button state feedback (colour/label).
+
+[↑ Back to Table of Contents](#table-of-contents)
+
+---
+
+### Companion cue-status relay
+
+Lets a Stream Deck page **show** each cue's state (playing / played) and **react** when a
+cue starts or ends, through Companion's **Generic OSC** module on the controller itself.
+
+1. **Bridge config** (`/etc/cuems/power-bridge.conf`, then restart the bridge — playback is
+   never stopped by that):
+   ```
+   osc_relay_targets = 127.0.0.1:8480
+   osc_relay_listen  = 127.0.0.1:8478
+   ```
+2. **Generic OSC connection** (label `osc`): Target `127.0.0.1`, Target Port `8478`, UDP,
+   **Listen for Feedback** ✓, **Feedback Port** (module 2.7.0) or **Source Port** (2.8.x) `8480`.
+3. **Dump triggers**, so buttons are right after Companion starts or the connection is edited:
+   - event **startup** → wait 5 s → "Send message without arguments" `/cuems/bridge/dump`;
+   - event **interval**, every 60 s → the same message.
+4. **Per-cue button** (copy the cue's uuid from the CUEMS UI):
+   - press: Generic HTTP `POST http://localhost:8478/gocue` with body `{"cue":"<uuid>"}`;
+   - feedbacks, in this order: Integer `/engine/status/cue/<uuid>` `>= 1` → "playing" style;
+     the same path `= 100` → "played" style;
+   - optional (needs `cue_enabled/` in `osc_relay_keys`): `/engine/status/cue_enabled/<uuid>`
+     `= 0` → dimmed.
+5. **Link indicator and transport lamps** (fail safe):
+   - indicator: default red; Integer `/cuems/bridge/engine_connected` `= 1` → green; then
+     "Variable: Check boolean expression"
+     `$(internal:time_unix) - $(osc:latest_received_timestamp) / 1000 > 5` → red ("relay
+     silent": the bridge is gone);
+   - every transport lamp (`/engine/status/running`, `armed`, string feedbacks) ends with the
+     same two checks (`engine_connected != 1`, and the expression) styled grey.
+6. **"When cue X ends, do Y"**: a trigger with event **"On condition becoming true"** and
+   condition Integer `/cuems/bridge/cue_ended/<uuid>` `= 1` (likewise `cue_started`).
+   **Never** key a trigger on `/engine/status/cue/<uuid>` itself: dumps and restarts re-send
+   it and would fire the trigger.
+
+What the values mean (`/engine/status/cue/<uuid>`):
+
+| Value | When |
+|---|---|
+| `0` | Not played: at load, and after an operator STOP (every cue resets, no `100` in between) |
+| `1` (`1`–`99` reserved for progress) | Playing, from the cue's arrival (start of its pre-wait), not media start. Under Auto continue the whole chain lights together |
+| `100` | Ended: after pre-wait + max(media, post-wait); also after an ActionCue `stop` or `pause` of that cue, and when a lit cue is dropped or disarmed |
+
+Notes:
+- After the last cue ends the engine still reads `running = yes`, and the cues stay at `100`,
+  until the operator presses STOP (by design: operator-fired cues stay armed).
+- A cue faded out by an ActionCue `fade_out` stays at `1` (engine issue 869fexeyc); an
+  infinite loop stays at `1` until STOP.
+- "Ended" (`cue_ended`) also fires for an ActionCue `stop`/`pause` and a dropped cue. A STOP
+  fires no `cue_ended`.
+- Edge latency is about 0.1 s (measured p95 67–75 ms on Companion 4.3.3 / Generic OSC 2.7.0).
+  UDP gives no delivery guarantee: within the supported page size the rate limit keeps loss
+  at zero, but a lost datagram is a missed trigger.
+- **Page size:** _to be filled from the rig measurement (plan step R2.5): the largest number
+  of OSC feedbacks verified at the default `osc_relay_rate`, with 100 % edge delivery._ A
+  bigger page needs a lower `osc_relay_rate`.
+- Engines up to 0.1.0rc6-3, when switching straight from show X to show Y without an unload,
+  leave X-only cues' last values on X-only buttons until the next unload or link drop.
+- The next cue's **name** is not relayed: poll `GET /status` (`nextcue_name`) with Generic HTTP.
+- Security: Generic OSC's feedback port listens on **all interfaces without authentication**
+  (hard-coded in the module), so a host on the wired LAN can spoof a cue state or an edge and
+  fire a trigger — the same boundary as the unauthenticated GO on `:80/realtime`.
 
 [↑ Back to Table of Contents](#table-of-contents)
 
