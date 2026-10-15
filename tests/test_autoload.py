@@ -314,3 +314,61 @@ def test_multi_node_cluster_settles_after_bus_wait(monkeypatch):
     assert outcome == "armed"
     assert called["ips"] == {"10.0.0.9"}, "remote node was not waited for"
     assert 7 in slept, f"settle lost on the multi-node path: {slept}"
+
+
+# --- persistent mode re-drives only on an EMPTY load (869fhjdq5) ----------------
+
+
+def test_persistent_mode_does_not_redrive_a_loaded_project_that_is_rearming():
+    """A STOP (an operator's, or an authored stop_project cue) drops armed to
+    no while the nodes re-arm. Persistent mode used to read that as 'reload'
+    and, with auto_play, replay the show. Only an empty load is ours."""
+    b = _bridge()
+    b.cfg.auto_load_persistent = True
+    assert asyncio.run(b._try_auto_load()) == "armed"
+    assert b._auto_load_done
+    # The STOP: armed drops, the project stays loaded.
+    b.engine._apply_status("armed", "no")
+    assert not b.engine.fully_ready()
+    assert b._redrive_blocked()
+    # The re-arm completes: still nothing to do.
+    b.engine._apply_status("armed", "yes")
+    assert b._redrive_blocked()
+    # An unload: ours to fill again.
+    b.engine._apply_status("load", "")
+    assert not b._redrive_blocked()
+
+
+def test_once_only_mode_never_redrives_after_the_first_success():
+    b = _bridge()
+    assert asyncio.run(b._try_auto_load()) == "armed"
+    b.engine._apply_status("load", "")
+    b.engine._apply_status("armed", "no")
+    assert b._redrive_blocked()
+
+
+def test_nothing_blocks_the_first_drive():
+    b = _bridge()
+    assert not b._redrive_blocked()
+    b.cfg.auto_load_persistent = True
+    assert not b._redrive_blocked()
+
+
+def test_attempt_skips_when_the_engine_is_ready_after_the_settle():
+    """The loop's gate and the attempt's settle are separated by seconds; a
+    re-arm that finishes in between must not be reloaded."""
+    b = _bridge()
+    b.engine._apply_status("load", "projX")
+    b.engine._apply_status("armed", "yes")
+    assert asyncio.run(b._try_auto_load()) == "skipped"
+    assert b.editor.sent == []
+
+
+def test_attempt_skips_a_loaded_project_rearming_in_persistent_mode():
+    b = _bridge()
+    b.cfg.auto_load_persistent = True
+    assert asyncio.run(b._try_auto_load()) == "armed"
+    sent_before = len(b.editor.sent)
+    b.engine._apply_status("armed", "no")
+    assert asyncio.run(b._try_auto_load()) == "skipped"
+    assert len(b.editor.sent) == sent_before

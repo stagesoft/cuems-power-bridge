@@ -693,9 +693,7 @@ class Bridge:
                 self._auto_load_disabled = True
                 self._auto_load_disabled_reason = "clobber"
                 return
-            # Once-only mode: we already succeeded and operator likely
-            # unloaded intentionally — don't re-drive.
-            if self._auto_load_done and not self.cfg.auto_load_persistent:
+            if self._redrive_blocked():
                 continue
             try:
                 outcome = await self._try_auto_load()
@@ -869,6 +867,25 @@ class Bridge:
         self._auto_load_ids_warned = True
         return result
 
+    def _redrive_blocked(self) -> bool:
+        """After our first success, when is a not-fully-ready engine NOT ours
+        to re-drive?
+
+        Once-only mode (the default): always — the operator likely unloaded on
+        purpose. Persistent mode: whenever a project is still LOADED. That is
+        what the docs always promised ("re-drive on every observed empty-load"),
+        and it matters since 869fhjdq5: a STOP, the operator's or an authored
+        stop_project cue at the end of an unattended show, drops `armed` to no
+        while the nodes re-arm. Reading that window as "reload" clobbered the
+        kiosk's next GO with a full reload (409 meanwhile), and with auto_play
+        replayed the show. Only an EMPTY load is ours to fill.
+        """
+        if not self._auto_load_done:
+            return False
+        if not self.cfg.auto_load_persistent:
+            return True
+        return self.engine.project_loaded()
+
     async def _try_auto_load(self) -> str:
         """One auto-load attempt. Returns a classification:
         "armed" | "editor_error" | "not_armed" | "skipped".
@@ -928,6 +945,20 @@ class Bridge:
         # operator has turned the node wait off.
         if self.cfg.auto_load_wait_nodes:
             await asyncio.sleep(self.cfg.auto_load_node_settle_s)
+
+        # (3b) Re-check after the settle: a re-arm window (a STOP's, or an
+        # authored stop_project cue's, 869fhjdq5) is shorter than the settle,
+        # so the engine may be loaded and armed again by now, or still
+        # re-arming our own project. Either way a project_ready now would
+        # reload a show that is fine. Only an EMPTY load is ours to fill.
+        if self.engine.fully_ready():
+            log.info("auto-load: engine loaded and armed after the settle; "
+                     "nothing to do")
+            return "skipped"
+        if self._redrive_blocked():
+            log.info("auto-load: a project is loaded (re-arming) after the "
+                     "settle; not reloading it")
+            return "skipped"
 
         # (4) Fire project_ready — as an operation (plan 869fghmxn D12), so the
         # one-request rule covers it and an operator press of the same project

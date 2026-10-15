@@ -1,3 +1,15 @@
+cuems-power-bridge (0.3.1-2) unstable; urgency=medium
+
+  * Persistent auto-load re-drives only on an EMPTY load, as documented,
+    and re-checks after the settle (869fhjdq5, PR #10). Before, the re-arm
+    window after any STOP (an operator's, or an authored stop_project cue
+    at the end of an unattended show) triggered a full reload, and with
+    auto_play a replay: 4 reloads and 1 self-replay in 10 kiosk cycles on
+    test2 with 0.3.0-11, none with this release. Once-only mode unchanged.
+  * Numbered above 0.3.0-11 and the open xml-refactor line (0.3.1-1).
+
+ -- Ion Reguera <ion@stagelab.coop>  Thu, 15 Oct 2026 18:42:29 +0200
+
 cuems-power-bridge (0.3.0-11) unstable; urgency=medium
 
   * NDI preview (plan 869ekxuez rev 12.2): sizes and machine health.
