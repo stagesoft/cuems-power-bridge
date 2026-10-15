@@ -59,7 +59,10 @@ PER_CUE_PREFIXES = ("cue/", "cue_enabled/", "cue_name/")
 
 DEFAULT_KEYS = "cue/,running,armed,load,nextcue"
 DEFAULT_LISTEN = "127.0.0.1:8478"
-DEFAULT_RATE = 1000
+# 250/s: the rig measurement (plan R2.5, .111 N97, Companion 4.3.3) lost edge
+# pulses at 1000/s with no socket drop once Companion fell behind; 500 passed
+# at ~95 % of a core, 250 at ~55 %.
+DEFAULT_RATE = 250
 RATE_MIN, RATE_MAX = 100, 8000
 REFRESH_MIN_S = 30.0
 

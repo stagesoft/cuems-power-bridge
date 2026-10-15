@@ -103,7 +103,7 @@ project_op_timeout_s = 450
 #osc_relay_listen = 127.0.0.1:8478         # UDP; Companion sends /cuems/bridge/dump here; empty = off
 #osc_relay_keys = cue/,running,armed,load,nextcue  # "x/" = prefix; opt-in: cue_enabled/, cue_name/
 #osc_relay_refresh_s = 0                   # periodic full re-send; 0 = off, else >= 30
-#osc_relay_rate = 1000                     # datagrams per second (100..8000)
+#osc_relay_rate = 250                      # datagrams per second (100..8000); higher loses edges in Companion
 
 # --- Operational ---
 dry_run = false                           # true = log side-effects without executing

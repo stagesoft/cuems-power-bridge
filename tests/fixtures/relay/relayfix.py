@@ -16,6 +16,14 @@ order: load_project, _clear_playback_state, stop_script,
 _on_ws_client_connect). They are MODELS, not captures. Captures from a live
 engine (`capture_*.bin`, plan step R1) use the same format.
 
+`capture_rc1_111.bin` is the live R1 capture from .111 (2026-10-15; engine
+hot-patched to the rc_1 load order): unload video-test, load audio-test, GO,
+natural end of its one AudioCue (b3c23544…), STOP, GO, STOP mid-play. Every
+frame is byte-for-byte as the engine sent it, except that the once-a-second
+`timecode` frames were removed and gaps longer than 3 s were shortened to 3 s
+(the natural end came 224 s after GO), so the replay takes seconds. The full
+capture is kept in cuems-RELATIONS/baselines/companion-relay/r1/.
+
 Regenerate the models with:  python3 tests/fixtures/relay/relayfix.py
 """
 

@@ -1198,7 +1198,7 @@ the bridge (or the cuems-common tools that load this file).
 | `osc_relay_listen` | `127.0.0.1:8478` | UDP address for `/cuems/bridge/dump`; empty = no listener. A bad value (or equal to a target, or the port in use) disables only the listener |
 | `osc_relay_keys` | `cue/,running,armed,load,nextcue` | What is forwarded; `x/` is a prefix, anything else exact. Opt-in: `cue_enabled/`, `cue_name/`. Empty or bad disables the relay |
 | `osc_relay_refresh_s` | `0` | Periodic full re-send; `0` = off, else ≥ 30 (smaller values become 30; a non-number means off) |
-| `osc_relay_rate` | `1000` | Datagrams per second, 100–8000 (clamped; a non-number means 1000) |
+| `osc_relay_rate` | `250` | Datagrams per second, 100–8000 (clamped; a non-number means 250). Measured on an N97 controller: above 500/s Companion falls behind and **loses edge pulses without dropping a datagram**; 250 leaves it at about half a core |
 
 Controller only: on a node, leave `osc_relay_targets` empty (the relay would report
 `engine_connected 0` forever). UDP 8478 is used by nothing else in CUEMS (TCP 8478 is the
@@ -1563,9 +1563,21 @@ Notes:
 - Edge latency is about 0.1 s (measured p95 67–75 ms on Companion 4.3.3 / Generic OSC 2.7.0).
   UDP gives no delivery guarantee: within the supported page size the rate limit keeps loss
   at zero, but a lost datagram is a missed trigger.
-- **Page size:** _to be filled from the rig measurement (plan step R2.5): the largest number
-  of OSC feedbacks verified at the default `osc_relay_rate`, with 100 % edge delivery._ A
-  bigger page needs a lower `osc_relay_rate`.
+- **Page size — keep it small.** Verified (N97 controller, Companion 4.3.3, Generic OSC 2.7.0):
+  **about 85 OSC feedbacks** on the relay connection (one full page of 32 cue buttons with
+  two feedbacks each, plus the link and transport lamps) deliver 100 % of edges at the default
+  250/s, with Companion at about half a core. Nothing between 85 and 600 has been measured.
+  ⚠️ **Do not build a page with hundreds of OSC feedbacks** (for example a button for every cue
+  of a 300-cue show): at 600 feedbacks Companion's Generic OSC process fell behind, its memory
+  grew without bound (14 GB) and the controller ran out of memory — at every rate tried, down
+  to 100/s. A lower `osc_relay_rate` does not make a large page safe.
+- Edges are lost before datagrams are: when Companion cannot keep up it evaluates a pulse's
+  `0`, `1`, `0` together and the trigger never sees the `1`, with no socket drop to show it.
+  That is why the default rate is 250/s, not higher.
+- A show that ends on a `stop_project` ActionCue (planned engine feature) can reset its last
+  media cue before that cue's end is reported, so its `cue_ended` may not fire.
+- A WebSocket client of the engine that closes slowly (a script, a browser tab, a dropped
+  client) can delay every status frame for up to ~10 s, the relay's included (engine issue).
 - Engines up to 0.1.0rc6-3, when switching straight from show X to show Y without an unload,
   leave X-only cues' last values on X-only buttons until the next unload or link drop.
 - The next cue's **name** is not relayed: poll `GET /status` (`nextcue_name`) with Generic HTTP.

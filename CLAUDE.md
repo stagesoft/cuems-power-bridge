@@ -47,6 +47,7 @@ Part of the **CUEMS** ecosystem — see the [`cuems-RELATIONS`](https://github.c
   - Isolation: `from_config`, `start()` and `stats()` failures never take the bridge or `/status` down; hooks (`EngineClient.on_frame` / `on_connect` / `on_disconnect`) are registered **before** `engine.start()`; `close()` runs after `engine.stop()` (link 0 first, trailing `0` of in-flight pulses, then a 0.5 s flush).
   - **A dev bridge next to the installed one must blank `osc_relay_*`** (or move the ports): two relays on one listen port → the second's listener is disabled; two relays on one Companion port interleave.
   - A natural end leaves `running = yes` and the cues at `100` until STOP (engine design); STOP resets every cue to `0` with no `cue_ended`.
+  - **Rate and page size are rig-measured limits, not tunables to raise** (R2.5, .111 N97, `cuems-RELATIONS/baselines/companion-relay/R-20261015.md`): at 1000/s Companion lost edges with 0 socket drops (it falls behind and evaluates a pulse's 0/1/0 in one batch) → default **250/s**. A **600-feedback page ran Companion's Generic OSC process to 14 GB and OOM'd the controller at every rate down to 100/s**; ~85 feedbacks verified. Never "fix" lost edges by raising the rate.
 
 All endpoints validate the optional `X-Auth-Token` header against `power-bridge.conf:shared_token` (`/status` is unauthenticated).
 

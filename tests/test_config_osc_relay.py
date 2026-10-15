@@ -60,7 +60,7 @@ def test_good_config():
     assert r.enabled and r.last_error is None
     assert [t.name for t in r._targets] == ["127.0.0.1:8480", "127.0.0.1:8481"]
     assert r.keys == ["cue/", "running", "load"]
-    assert r.listen == ("127.0.0.1", 8478) and r.rate == 1000 and r.refresh_s == 0
+    assert r.listen == ("127.0.0.1", 8478) and r.rate == 250 and r.refresh_s == 0
 
 
 @pytest.mark.parametrize("targets", ["abc", "host.local:8480", "127.0.0.1",
@@ -94,8 +94,8 @@ def test_empty_listen_means_no_listener_and_no_error():
     assert r.enabled and r.listen is None and r.last_error is None
 
 
-@pytest.mark.parametrize("raw,want", [("abc", 1000), ("30.5", 1000), ("", 1000),
-                                      ("60s", 1000), ("5", 100), ("99999", 8000),
+@pytest.mark.parametrize("raw,want", [("abc", 250), ("30.5", 250), ("", 250),
+                                      ("60s", 250), ("5", 100), ("99999", 8000),
                                       ("2000", 2000)])
 def test_rate_clamps_or_falls_back(raw, want, caplog):
     r = OscRelay.from_config(_cfg(osc_relay_targets="127.0.0.1:8480", osc_relay_rate=raw))

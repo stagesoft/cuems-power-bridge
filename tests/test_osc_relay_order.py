@@ -128,6 +128,16 @@ async def test_rc1_known_limit_keeps_the_stale_value_without_an_edge():
     assert last(got, S + "load") == "show_y"
 
 
+async def test_live_rc1_capture_from_111():
+    """R1 on .111: GO -> natural end -> STOP, then GO -> STOP mid-play. Two
+    cue_started, ONE cue_ended (the natural end); no edge from either STOP."""
+    cue = "b3c23544-81fa-4884-9380-8cb3bb77d982"
+    _, got = await run("capture_rc1_111.bin")
+    assert edges(got) == sorted([started(cue), started(cue), ended(cue)])
+    assert [v for a, v, _ in got if a == S + "load"][-2:] == ["", "audio-test"]
+    assert last(got, S + f"cue/{cue}") == 0
+
+
 async def test_edges_without_forwarding_cue_status():
     _, got = await run("model_rc1_show.bin", keys="running,load")
     assert not any(a.startswith(S + "cue/") for a, _, _ in got)

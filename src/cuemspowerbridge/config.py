@@ -75,7 +75,7 @@ class Config:
     osc_relay_listen: str = "127.0.0.1:8478"
     osc_relay_keys: str = "cue/,running,armed,load,nextcue"
     osc_relay_refresh_s: str = "0"
-    osc_relay_rate: str = "1000"
+    osc_relay_rate: str = "250"
 
     # NNG hub port the node-engines connect to. NOT a conf knob: resolved
     # from <nng_hub_port> in settings.xml at load() time (single source of
