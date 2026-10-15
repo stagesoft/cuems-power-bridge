@@ -1563,14 +1563,24 @@ Notes:
 - Edge latency is about 0.1 s (measured p95 67–75 ms on Companion 4.3.3 / Generic OSC 2.7.0).
   UDP gives no delivery guarantee: within the supported page size the rate limit keeps loss
   at zero, but a lost datagram is a missed trigger.
-- **Page size — keep it small.** Verified (N97 controller, Companion 4.3.3, Generic OSC 2.7.0):
-  **about 85 OSC feedbacks** on the relay connection (one full page of 32 cue buttons with
-  two feedbacks each, plus the link and transport lamps) deliver 100 % of edges at the default
-  250/s, with Companion at about half a core. Nothing between 85 and 600 has been measured.
-  ⚠️ **Do not build a page with hundreds of OSC feedbacks** (for example a button for every cue
-  of a 300-cue show): at 600 feedbacks Companion's Generic OSC process fell behind, its memory
-  grew without bound (14 GB) and the controller ran out of memory — at every rate tried, down
-  to 100/s. A lower `osc_relay_rate` does not make a large page safe.
+- **Page size: keep `feedbacks × osc_relay_rate` ≤ about 30 000.** Generic OSC re-checks
+  every feedback of the connection for every datagram it receives, so Companion's work is the
+  number of OSC feedbacks on the relay connection times the rate. Measured on an N97
+  controller (Companion 4.3.3, Generic OSC 2.7.0), 100 % of edges delivered unless noted:
+
+  | OSC feedbacks | rate | Companion CPU | result |
+  |---|---|---|---|
+  | ~85 (one page: 32 cue buttons + lamps) | 250/s (default) | ~55 % | ✅ |
+  | ~170 | 250/s | ~95 % | ✅, no headroom |
+  | ~320 | 100/s | ~83 % | ✅ |
+  | ~320 | 250/s | — | ❌ falls behind, memory +2.5 GB/min until killed |
+  | ~620 | 100/s and up | — | ❌ same; ran an uncapped controller out of memory |
+
+  So at the default 250/s keep the relay connection to about **120 feedbacks** (about 50 cue
+  buttons with two feedbacks each, plus the lamps); for a bigger page lower
+  `osc_relay_rate` (300 feedbacks → 100/s; button states then settle about 3 s after a
+  300-cue load or STOP). ⚠️ Past the limit Companion's Generic OSC process does not just
+  lag: its memory grows without bound and can run the **controller** out of memory.
 - Edges are lost before datagrams are: when Companion cannot keep up it evaluates a pulse's
   `0`, `1`, `0` together and the trigger never sees the `1`, with no socket drop to show it.
   That is why the default rate is 250/s, not higher.
