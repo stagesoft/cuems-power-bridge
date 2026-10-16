@@ -68,10 +68,12 @@ class Config:
     project_op_timeout_s: str = "450"
 
     # Companion cue-status relay (osc_relay.py): /engine/status/* re-sent over
-    # UDP OSC to Companion's Generic OSC module. All five are raw strings,
-    # parsed by OscRelay.from_config(), so no value here can make
-    # config.load() raise. Empty targets = relay off (the default).
-    osc_relay_targets: str = ""
+    # UDP OSC to Companion's Generic OSC module. OFF unless
+    # osc_relay_enabled = true (the default is false). All six are raw
+    # strings, parsed by OscRelay.from_config(), so no value here can make
+    # config.load() raise.
+    osc_relay_enabled: str = "false"
+    osc_relay_targets: str = "127.0.0.1:8480"
     osc_relay_listen: str = "127.0.0.1:8478"
     osc_relay_keys: str = "cue/,running,armed,load,nextcue"
     osc_relay_refresh_s: str = "0"

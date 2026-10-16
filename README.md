@@ -441,11 +441,11 @@ Binary OSC message parser.
 **Module:** `src/cuemspowerbridge/osc_relay.py`
 
 Re-sends the engine's `/engine/status/*` frames to Bitfocus Companion's Generic OSC module
-over **UDP** (Companion cannot read the engine's binary-OSC WebSocket). Off unless
-`osc_relay_targets` is set. Passive: it never sends anything to the engine.
+over **UDP** (Companion cannot read the engine's binary-OSC WebSocket). **Off unless
+`osc_relay_enabled = true`** (default `false`). Passive: it never sends anything to the engine.
 
-* **`OscRelay.from_config(cfg, engine)`** — `None` when no targets are set. Never raises:
-  bad targets/keys give a disabled relay with `last_error`, a bad listen value disables only
+* **`OscRelay.from_config(cfg, engine)`** — `None` unless `osc_relay_enabled` is true. Never
+  raises: empty or bad targets / bad keys give a disabled relay with `last_error`, a bad listen value disables only
   the listener, rate/refresh clamp or fall back with one warning.
 * **Hooks** — `on_frame` (only enqueues, never does I/O), `on_engine_connect`,
   `on_engine_disconnect`; wired by `Bridge` **before** the engine client starts.
@@ -1189,18 +1189,22 @@ auto-load until the bridge restarts; loading the `auto_load_project` itself keep
 
 #### Companion cue-status relay
 
-Off unless `osc_relay_targets` is set. All five keys are read leniently: no value can stop
-the bridge (or the cuems-common tools that load this file).
+**The switch is `osc_relay_enabled`, and it defaults to OFF.** Set it to `true` and restart
+`cuems-power-bridge` to turn the relay on; set it to `false` (or remove it) and restart to
+turn it off. A restart never stops a running show. With the switch on, the other keys'
+defaults already match the Companion recipe below. All six keys are read leniently: no value
+can stop the bridge (or the cuems-common tools that load this file).
 
 | Key | Default | Description |
 |---|---|---|
-| `osc_relay_targets` | `""` | CSV of `IP:port` (literal IPs only, no `.local`). Empty = relay off. A bad value disables the relay (`/status` `osc_relay.last_error`) |
+| `osc_relay_enabled` | `false` | **On/off switch.** `true`/`yes`/`on`/`1` (any case) = on; `false`/`no`/`off`/`0`/empty = off; any other value = off, with a warning in the log. `/status` shows `osc_relay.enabled` |
+| `osc_relay_targets` | `127.0.0.1:8480` | CSV of `IP:port` (literal IPs only, no `.local`); used only when the switch is on. Empty or bad disables the relay (`/status` `osc_relay.last_error`) |
 | `osc_relay_listen` | `127.0.0.1:8478` | UDP address for `/cuems/bridge/dump`; empty = no listener. A bad value (or equal to a target, or the port in use) disables only the listener |
 | `osc_relay_keys` | `cue/,running,armed,load,nextcue` | What is forwarded; `x/` is a prefix, anything else exact. Opt-in: `cue_enabled/`, `cue_name/`. Empty or bad disables the relay |
 | `osc_relay_refresh_s` | `0` | Periodic full re-send; `0` = off, else ≥ 30 (smaller values become 30; a non-number means off) |
 | `osc_relay_rate` | `250` | Datagrams per second, 100–8000 (clamped; a non-number means 250). Measured on an N97 controller: above 500/s Companion falls behind and **loses edge pulses without dropping a datagram**; 250 leaves it at about half a core |
 
-Controller only: on a node, leave `osc_relay_targets` empty (the relay would report
+Controller only: on a node, leave `osc_relay_enabled` off (the relay would report
 `engine_connected 0` forever). UDP 8478 is used by nothing else in CUEMS (TCP 8478 is the
 bridge's HTTP). A development bridge run next to the installed one must blank `osc_relay_*`
 or move the ports.
@@ -1519,9 +1523,11 @@ cue starts or ends, through Companion's **Generic OSC** module on the controller
 1. **Bridge config** (`/etc/cuems/power-bridge.conf`, then restart the bridge — playback is
    never stopped by that):
    ```
-   osc_relay_targets = 127.0.0.1:8480
-   osc_relay_listen  = 127.0.0.1:8478
+   osc_relay_enabled = true
    ```
+   (the defaults are `osc_relay_targets = 127.0.0.1:8480` and `osc_relay_listen =
+   127.0.0.1:8478`, which is what the steps below use; to turn the relay off again, set
+   `osc_relay_enabled = false` and restart)
 2. **Generic OSC connection** (label `osc`): Target `127.0.0.1`, Target Port `8478`, UDP,
    **Listen for Feedback** ✓, **Feedback Port** (module 2.7.0) or **Source Port** (2.8.x) `8480`.
 3. **Dump triggers**, so buttons are right after Companion starts or the connection is edited:
