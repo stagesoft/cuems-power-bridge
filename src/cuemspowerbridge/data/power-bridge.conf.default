@@ -95,10 +95,17 @@ project_op_timeout_s = 450
 # every 2 s) and the edge pulses /cuems/bridge/cue_started/<uuid> and
 # /cuems/bridge/cue_ended/<uuid> (0 -> 1 -> 0) for "when cue X ends" triggers.
 # Companion asks for a full re-send with /cuems/bridge/dump on the listen port.
-# Controller only; OFF unless osc_relay_targets is set. Shown commented out:
-# the values are the code defaults. See README "Companion cue-status relay".
-# A bad value never stops the bridge: bad targets/keys disable the relay
-# (logged, /status osc_relay.last_error), rate/refresh fall back or clamp.
+# Controller only. See README "Companion cue-status relay".
+#
+# THE SWITCH: OFF by default. Set to true and restart cuems-power-bridge to
+# turn it on; false (or remove the line) and restart to turn it off. Only
+# true/yes/on/1 mean on; anything else means off (with a warning in the log).
+osc_relay_enabled = false
+#
+# The rest are shown commented out with their code defaults; with the switch
+# on, the defaults match the README's Companion recipe. A bad value never
+# stops the bridge: bad targets/keys disable the relay (logged, /status
+# osc_relay.last_error), rate/refresh fall back or clamp.
 #osc_relay_targets = 127.0.0.1:8480        # CSV of IP:port, literal IPs only (no .local)
 #osc_relay_listen = 127.0.0.1:8478         # UDP; Companion sends /cuems/bridge/dump here; empty = off
 #osc_relay_keys = cue/,running,armed,load,nextcue  # "x/" = prefix; opt-in: cue_enabled/, cue_name/

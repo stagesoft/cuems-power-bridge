@@ -23,6 +23,8 @@ def _cfg(**kw):
     c.editor_ws_url = "ws://127.0.0.1:9"
     c.listen_host, c.listen_port = "127.0.0.1", 0
     c.projector_power_on_on_load = False
+    if "osc_relay_targets" in kw:          # tests that want the relay: switch it on
+        kw.setdefault("osc_relay_enabled", "true")
     for k, v in kw.items():
         setattr(c, k, v)
     return c

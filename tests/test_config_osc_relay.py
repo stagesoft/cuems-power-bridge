@@ -16,7 +16,7 @@ from cuemspowerbridge import osc_relay as R
 from cuemspowerbridge.config import Config
 from cuemspowerbridge.osc_relay import OscRelay
 
-KEYS = ("osc_relay_targets", "osc_relay_listen", "osc_relay_keys",
+KEYS = ("osc_relay_enabled", "osc_relay_targets", "osc_relay_listen", "osc_relay_keys",
         "osc_relay_refresh_s", "osc_relay_rate")
 BAD = ("abc", "30.5", "", "60s", "-1", "1e9", "nan", "inf", "0x10", "127.0.0.1",
        "host.local:8480", "1.2.3.4:0", "1.2.3.4:99999", ",,,", "a b", "/x")
@@ -30,7 +30,10 @@ def fresh_warnings():
 
 
 def _cfg(**kw):
+    """A Config with the relay switched ON unless the test says otherwise:
+    most tests here are about parsing the other keys."""
     c = Config()
+    kw.setdefault("osc_relay_enabled", "true")
     for k, v in kw.items():
         setattr(c, k, v)
     return c
@@ -40,8 +43,8 @@ def _cfg(**kw):
 @pytest.mark.parametrize("value", BAD)
 def test_config_load_never_raises(tmp_path, key, value):
     p = tmp_path / "pb.conf"
-    p.write_text(f"{key} = {value}\nosc_relay_targets = 127.0.0.1:8480\n"
-                 if key != "osc_relay_targets" else f"{key} = {value}\n")
+    other = "" if key == "osc_relay_enabled" else "osc_relay_enabled = true\n"
+    p.write_text(f"{key} = {value}\n{other}")
     cfg = config.load(str(p))
     assert isinstance(getattr(cfg, key), str)
     # from_config never raises either.
@@ -50,7 +53,8 @@ def test_config_load_never_raises(tmp_path, key, value):
 
 def test_defaults_mean_off_and_no_socket():
     cfg = config.load("/nonexistent/power-bridge.conf")
-    assert cfg.osc_relay_targets == ""
+    assert cfg.osc_relay_enabled == "false"
+    assert cfg.osc_relay_targets == "127.0.0.1:8480"   # recipe default, unused while off
     assert OscRelay.from_config(cfg) is None
 
 
@@ -130,9 +134,44 @@ def test_typos_are_reported(tmp_path, caplog):
     assert any("osc_relay_target" in m for m in caplog.messages)
 
 
-def test_default_conf_ships_the_block_commented_out():
+def test_default_conf_ships_the_switch_off_and_the_rest_commented_out():
     from importlib import resources
     text = resources.files("cuemspowerbridge.data").joinpath(
         "power-bridge.conf.default").read_text()
     lines = [ln for ln in text.splitlines() if "osc_relay_" in ln]
-    assert lines and all(ln.lstrip().startswith("#") for ln in lines)
+    live = [ln.split("#", 1)[0].strip() for ln in lines if not ln.lstrip().startswith("#")]
+    assert live == ["osc_relay_enabled = false"]
+
+
+@pytest.mark.parametrize("raw", ["true", "TRUE", "yes", "On", "1", " true "])
+def test_switch_on_values(raw):
+    r = OscRelay.from_config(_cfg(osc_relay_enabled=raw))
+    assert r is not None and r.enabled and r.last_error is None
+    assert [t.name for t in r._targets] == ["127.0.0.1:8480"]   # recipe default
+
+
+@pytest.mark.parametrize("raw", ["false", "False", "no", "off", "0", ""])
+def test_switch_off_values_are_silent(raw, caplog):
+    assert OscRelay.from_config(_cfg(osc_relay_enabled=raw)) is None
+    assert not any("osc_relay_enabled" in m for m in caplog.messages)
+
+
+@pytest.mark.parametrize("raw", ["maybe", "enabled", "2", "tru"])
+def test_switch_unknown_value_means_off_with_one_warning(raw, caplog):
+    for _ in range(2):
+        assert OscRelay.from_config(_cfg(osc_relay_enabled=raw)) is None
+    assert sum("osc_relay_enabled" in m for m in caplog.messages) == 1
+
+
+def test_switch_on_with_empty_targets_is_a_disabled_relay_with_a_reason():
+    r = OscRelay.from_config(_cfg(osc_relay_enabled="true", osc_relay_targets=""))
+    assert r is not None and not r.enabled
+    assert "osc_relay_targets is empty" in r.last_error
+    assert r.stats()["enabled"] is False
+
+
+def test_switch_from_a_conf_file(tmp_path):
+    p = tmp_path / "pb.conf"
+    p.write_text("osc_relay_enabled = true   # turn the relay on\n")
+    r = OscRelay.from_config(config.load(str(p)))
+    assert r is not None and r.enabled

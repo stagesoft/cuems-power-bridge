@@ -167,6 +167,22 @@ def parse_keys(text: str) -> list[str]:
     return keys
 
 
+_TRUE = ("true", "yes", "on", "1")
+_FALSE = ("false", "no", "off", "0", "")
+
+
+def parse_enabled(text: str) -> bool:
+    """The on/off switch, osc_relay_enabled. Only true/yes/on/1 (any case)
+    turn the relay on; anything unrecognised means OFF, with one warning."""
+    v = str(text if text is not None else "").strip().lower()
+    if v in _TRUE:
+        return True
+    if v not in _FALSE:
+        _warn_once("osc_relay_enabled", "config: osc_relay_enabled=%r is not "
+                   "true/false; the relay stays OFF", text)
+    return False
+
+
 def parse_rate(text: str) -> int:
     """Never disables: non-number → default, out of range → clamped."""
     try:
@@ -343,15 +359,20 @@ class OscRelay:
 
     @classmethod
     def from_config(cls, cfg: Any, engine: Any = None) -> "OscRelay | None":
-        """None when no targets are configured (the default). Never raises: a
-        bad target/keys value returns a disabled relay carrying last_error; a
-        bad listen value disables only the listener; rate/refresh clamp."""
+        """None unless osc_relay_enabled is true (the default is false). Never
+        raises: an empty or bad target / bad keys value returns a disabled
+        relay carrying last_error; a bad listen value disables only the
+        listener; rate/refresh clamp."""
         unknown = unknown_relay_keys(cfg)
         for k in unknown:
             log.warning("config: unknown key %r (osc relay typo?)", k)
+        if not parse_enabled(getattr(cfg, "osc_relay_enabled", "false")):
+            return None
         raw_targets = str(getattr(cfg, "osc_relay_targets", "") or "")
         if not raw_targets.strip():
-            return None
+            msg = "osc_relay_enabled = true but osc_relay_targets is empty"
+            log.error("osc relay: %s — relay DISABLED", msg)
+            return cls([], enabled=False, last_error=msg, unknown_keys=unknown)
         errors: list[str] = []
         try:
             targets = parse_targets(raw_targets)
