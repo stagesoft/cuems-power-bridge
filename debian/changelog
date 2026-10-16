@@ -1,3 +1,16 @@
+cuems-power-bridge (0.3.2-2) unstable; urgency=medium
+
+  * Companion cue-status relay: explicit on/off switch osc_relay_enabled,
+    DEFAULT OFF (PR #14). Only true/yes/on/1 turn the relay on; any other
+    value means off (with one warning). osc_relay_targets now defaults to
+    the README recipe's 127.0.0.1:8480, so osc_relay_enabled = true alone
+    turns it on. The shipped default conf shows osc_relay_enabled = false.
+  * UPGRADE NOTE: a box that turned the relay on by setting only
+    osc_relay_targets must add osc_relay_enabled = true, or the relay goes
+    off after this upgrade (test2's controller already has it).
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 16 Oct 2026 14:12:51 +0200
+
 cuems-power-bridge (0.3.2-1) unstable; urgency=medium
 
   * Companion cue-status relay (PR #12, plan 2026-10-09 companion relay):
