@@ -7,9 +7,9 @@ export DH_VIRTUALENV_INSTALL_ROOT=/usr/lib
 # the package, producing a .deb that crashes at runtime with ModuleNotFound.
 export PYTHONNOUSERSITE=1
 
-# cuemsutils is a real, bounded dependency (>=0.1.0rc16,<0.1.1) since feature
-# 001, and that version is NOT on PyPI — the newest published there is
-# 0.1.0rc14. It is built from the sibling checkout instead, whose
+# cuemsutils is a real, bounded dependency since feature 001, bounded
+# >=0.1.1,<0.1.2 since cuems-utils feature 016, and 0.1.1 is NOT on PyPI yet
+# (the rc line stops below it). It is built from the sibling checkout instead, whose
 # feat/xml-refactor branch carries the node model, the schemas and the
 # settings.xml this package now depends on.
 #
@@ -25,7 +25,7 @@ WHEELDIR = $(CURDIR)/debian/.cuemsutils-wheel
 $(WHEELDIR)/.stamp:
 	@if [ ! -d "$(CUEMS_UTILS_SRC)" ]; then \
 		echo "ERROR $(CUEMS_UTILS_SRC) not found."; \
-		echo "      cuemsutils >=0.1.0rc16 is not on PyPI (newest there: 0.1.0rc14),"; \
+		echo "      cuemsutils >=0.1.1 is not on PyPI yet,"; \
 		echo "      so the build needs the cuems-utils checkout beside this one, or"; \
 		echo "      CUEMS_UTILS_SRC=/path/to/cuems-utils on the make command line."; \
 		exit 1; \

@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "cuemspowerbridge"
-version = "0.3.1"
+version = "0.4.0"
 description = "CUEMS power bridge: Shelly + Companion shutdown coordinator and engine WebSocket client"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -35,7 +35,7 @@ python-osc = ">=1.8"
 # runtime dependency, not an extra — and upper-bounded, because a floor alone
 # cannot say "refuse a library that has moved past me", which is what the
 # release gate needs. Bounded the way cuems-nodeconf bounds its own.
-cuemsutils = ">=0.1.0rc16,<0.1.1"
+cuemsutils = ">=0.1.1,<0.1.2"
 # systemd-python is provided by python3-systemd (see debian/control).
 
 [tool.poetry.group.dev.dependencies]
